@@ -215,12 +215,6 @@ func (fs *FileSync) recordLocalChanges(files []p2p.FileInfo) error {
 }
 
 func (fs *FileSync) DownloadFile(serverName, filePath string) error {
-	reader, err := fs.p2p.RequestFile(serverName, filePath)
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-
 	localPath := filepath.Join(fs.config.Server.SyncDir, filePath)
 
 	// Ensure directory exists
@@ -228,24 +222,76 @@ func (fs *FileSync) DownloadFile(serverName, filePath string) error {
 		return err
 	}
 
-	file, err := os.Create(localPath)
+	// Check if file already exists and get its size for resume
+	var existingSize int64 = 0
+	if info, err := os.Stat(localPath); err == nil {
+		existingSize = info.Size()
+		fmt.Printf("[SYNC] Resuming download from offset: %d bytes\n", existingSize)
+	}
+
+	// Request file with offset support
+	reader, fileSize, err := fs.p2p.RequestFileWithOffset(serverName, filePath, existingSize)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	// Open file for writing (append if resuming)
+	var file *os.File
+	if existingSize > 0 {
+		file, err = os.OpenFile(localPath, os.O_APPEND|os.O_WRONLY, 0644)
+	} else {
+		file, err = os.Create(localPath)
+	}
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	_, err = io.Copy(file, reader)
+	// Copy data in chunks
+	chunkSize := int64(fs.config.Sync.ChunkSize)
+	totalDownloaded := existingSize
+	buffer := make([]byte, chunkSize)
+
+	for {
+		n, err := reader.Read(buffer)
+		if n > 0 {
+			if _, writeErr := file.Write(buffer[:n]); writeErr != nil {
+				return fmt.Errorf("failed to write chunk: %w", writeErr)
+			}
+			totalDownloaded += int64(n)
+
+			// Progress logging (every 10MB)
+			if totalDownloaded%int64(10*1024*1024) == 0 {
+				progress := float64(totalDownloaded) / float64(fileSize) * 100
+				fmt.Printf("[SYNC] Download progress: %.1f%% (%d/%d bytes)\n",
+					progress, totalDownloaded, fileSize)
+			}
+		}
+
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("failed to read chunk: %w", err)
+		}
+	}
+
+	fmt.Printf("[SYNC] Download completed: %s (%d bytes)\n", filePath, totalDownloaded)
+
+	// Verify file size
+	if fileSize > 0 && totalDownloaded != fileSize {
+		return fmt.Errorf("file size mismatch: expected %d, got %d", fileSize, totalDownloaded)
+	}
+
+	// Calculate hash for verification
+	hash, err := fs.calculateFileHash(localPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to calculate hash: %w", err)
 	}
 
 	// Record the download
 	info, err := os.Stat(localPath)
-	if err != nil {
-		return err
-	}
-
-	hash, err := fs.calculateFileHash(localPath)
 	if err != nil {
 		return err
 	}

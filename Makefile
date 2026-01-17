@@ -47,6 +47,10 @@ test-sync:
 test-deletions:
 	./examples/test-deletions.sh
 
+# Demonstrate chunked transfer logic
+test-chunked:
+	./examples/test-chunked.sh
+
 # Clean build artifacts
 clean:
 	rm -rf bin/ logs/ sync_data*/ *.db examples/logs/ examples/sync_data*/ examples/*.db examples/*.pid
@@ -74,6 +78,7 @@ help:
 	@echo "  demo-test    - Quick demo test with file sync simulation"
 	@echo "  test-sync    - Demonstrate sync logic without network dependencies"
 	@echo "  test-deletions - Demonstrate deletion sync logic"
+	@echo "  test-chunked - Demonstrate chunked transfer for large files"
 	@echo "  clean        - Clean build artifacts"
 	@echo "  test         - Run tests"
 	@echo "  deps         - Download dependencies"

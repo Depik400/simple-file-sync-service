@@ -13,7 +13,7 @@ peers:
 sync:
   interval: 3  # seconds
   max_concurrent_transfers: 5
-  chunk_size: 1048576  # 1MB
+  chunk_size: 8388608  # 8MB chunks for large files
 
 database:
   path: "./examples/file_sync_server1.db"
