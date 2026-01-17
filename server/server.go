@@ -1,0 +1,403 @@
+package server
+
+import (
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	"file-sync/config"
+	"file-sync/db"
+	"file-sync/p2p"
+	"file-sync/sync"
+
+	"github.com/gorilla/mux"
+)
+
+type Server struct {
+	config *config.Config
+	db     *db.Database
+	p2p    *p2p.P2PNetwork
+	sync   *sync.FileSync
+	router *mux.Router
+}
+
+func NewServer(cfg *config.Config, database *db.Database, p2pNet *p2p.P2PNetwork, syncService *sync.FileSync) *Server {
+	s := &Server{
+		config: cfg,
+		db:     database,
+		p2p:    p2pNet,
+		sync:   syncService,
+		router: mux.NewRouter(),
+	}
+
+	s.setupRoutes()
+	return s
+}
+
+func (s *Server) setupRoutes() {
+	// Static files
+	s.router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("web/static/"))))
+
+	// API routes
+	s.router.HandleFunc("/api/files", s.handleGetFiles).Methods("GET")
+	s.router.HandleFunc("/api/files/{server}/{filePath:.*}", s.handleDownloadFile).Methods("GET")
+	s.router.HandleFunc("/api/history/{filePath:.*}", s.handleGetFileHistory).Methods("GET")
+	s.router.HandleFunc("/api/changes", s.handleGetRecentChanges).Methods("GET")
+	s.router.HandleFunc("/api/servers", s.handleGetServers).Methods("GET")
+	s.router.HandleFunc("/api/peers", s.handleGetPeers).Methods("GET")
+
+	// P2P routes
+	s.router.HandleFunc("/sync", s.handleSyncMessage).Methods("POST")
+	s.router.HandleFunc("/files/{filePath:.*}", s.handleServeFile).Methods("GET")
+	s.router.HandleFunc("/files/{filePath:.*}", s.handleReceiveFile).Methods("PUT")
+	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
+
+	// Web UI routes
+	s.router.HandleFunc("/", s.handleIndex).Methods("GET")
+	s.router.HandleFunc("/files", s.handleFilesPage).Methods("GET")
+	s.router.HandleFunc("/history", s.handleHistoryPage).Methods("GET")
+}
+
+func (s *Server) Start() error {
+	fmt.Printf("Starting server on %s (web + P2P API)\n", s.config.GetServerAddr())
+	return http.ListenAndServe(s.config.GetServerAddr(), s.router)
+}
+
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	tmpl := template.Must(template.ParseFiles("web/templates/index.html"))
+	tmpl.Execute(w, s.config.Server.Name)
+}
+
+func (s *Server) handleFilesPage(w http.ResponseWriter, r *http.Request) {
+	tmpl := template.Must(template.ParseFiles("web/templates/files.html"))
+	data := struct {
+		ServerName string
+		Peers      map[string]*config.PeerConfig
+	}{
+		ServerName: s.config.Server.Name,
+		Peers:      s.p2p.GetPeers(),
+	}
+	tmpl.Execute(w, data)
+}
+
+func (s *Server) handleHistoryPage(w http.ResponseWriter, r *http.Request) {
+	tmpl := template.Must(template.ParseFiles("web/templates/history.html"))
+	tmpl.Execute(w, s.config.Server.Name)
+}
+
+func (s *Server) handleGetFiles(w http.ResponseWriter, r *http.Request) {
+	files, err := s.sync.GetLocalFiles()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(files)
+}
+
+func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	serverName := vars["server"]
+	filePath := vars["filePath"]
+
+	if serverName == s.config.Server.Name {
+		// Local file
+		localPath := filepath.Join(s.config.Server.SyncDir, filePath)
+		http.ServeFile(w, r, localPath)
+		return
+	}
+
+	// Remote file
+	reader, err := s.p2p.RequestFile(serverName, filePath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer reader.Close()
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(filePath)))
+	io.Copy(w, reader)
+}
+
+func (s *Server) handleGetFileHistory(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	filePath := vars["filePath"]
+
+	limit := 50
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil {
+			limit = l
+		}
+	}
+
+	history, err := s.sync.GetFileHistory(filePath, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(history)
+}
+
+func (s *Server) handleGetRecentChanges(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil {
+			limit = l
+		}
+	}
+
+	changes, err := s.sync.GetRecentChanges(limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(changes)
+}
+
+func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
+	servers, err := s.db.GetAllServers()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(servers)
+}
+
+func (s *Server) handleGetPeers(w http.ResponseWriter, r *http.Request) {
+	peers := s.p2p.GetPeers()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(peers)
+}
+
+func (s *Server) handleSyncMessage(w http.ResponseWriter, r *http.Request) {
+	var msg p2p.SyncMessage
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		fmt.Printf("[SERVER] ERROR: Failed to decode sync message: %v\n", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	fmt.Printf("[SERVER] Received sync message from %s: type=%s\n", msg.Server, msg.Type)
+
+	// Handle sync message based on type
+	switch msg.Type {
+	case "file_list":
+		fmt.Printf("[SERVER] Processing file list from peer %s\n", msg.Server)
+
+		// Extract file list from message
+		filesData, ok := msg.Data["files"]
+		if !ok {
+			fmt.Printf("[SERVER] ERROR: No files data in message from %s\n", msg.Server)
+			break
+		}
+
+		// Convert to proper format
+		filesJson, err := json.Marshal(filesData)
+		if err != nil {
+			fmt.Printf("[SERVER] ERROR: Failed to marshal files data: %v\n", err)
+			break
+		}
+
+		var remoteFiles []p2p.FileInfo
+		if err := json.Unmarshal(filesJson, &remoteFiles); err != nil {
+			fmt.Printf("[SERVER] ERROR: Failed to unmarshal files data: %v\n", err)
+			break
+		}
+
+		fmt.Printf("[SERVER] Received %d files from peer %s\n", len(remoteFiles), msg.Server)
+
+		// Check which files we need to download
+		if err := s.checkAndDownloadMissingFiles(msg.Server, remoteFiles); err != nil {
+			fmt.Printf("[SERVER] ERROR: Failed to sync files from %s: %v\n", msg.Server, err)
+		}
+
+	case "file_deletions":
+		fmt.Printf("[SERVER] Processing file deletions from peer %s\n", msg.Server)
+
+		// Extract deletions list from message
+		deletionsData, ok := msg.Data["deletions"]
+		if !ok {
+			fmt.Printf("[SERVER] ERROR: No deletions data in message from %s\n", msg.Server)
+			break
+		}
+
+		// Convert to proper format
+		deletionsJson, err := json.Marshal(deletionsData)
+		if err != nil {
+			fmt.Printf("[SERVER] ERROR: Failed to marshal deletions data: %v\n", err)
+			break
+		}
+
+		var deletedFiles []p2p.FileInfo
+		if err := json.Unmarshal(deletionsJson, &deletedFiles); err != nil {
+			fmt.Printf("[SERVER] ERROR: Failed to unmarshal deletions data: %v\n", err)
+			break
+		}
+
+		fmt.Printf("[SERVER] Received %d deletions from peer %s\n", len(deletedFiles), msg.Server)
+
+		// Apply deletions
+		if err := s.applyDeletionsFromPeer(msg.Server, deletedFiles); err != nil {
+			fmt.Printf("[SERVER] ERROR: Failed to apply deletions from %s: %v\n", msg.Server, err)
+		}
+
+	case "request_sync":
+		fmt.Printf("[SERVER] Received sync request from %s\n", msg.Server)
+		// Send our file list back
+		localFiles, err := s.sync.GetLocalFiles()
+		if err != nil {
+			fmt.Printf("[SERVER] ERROR: Failed to get local files: %v\n", err)
+			break
+		}
+
+		response := p2p.SyncMessage{
+			Type:      "file_list",
+			Server:    s.config.Server.Name,
+			Data:      map[string]interface{}{"files": localFiles},
+			Timestamp: time.Now(),
+		}
+
+		if err := s.p2p.SendMessageToPeer(msg.Server, response); err != nil {
+			fmt.Printf("[SERVER] ERROR: Failed to send file list to %s: %v\n", msg.Server, err)
+		}
+
+	default:
+		fmt.Printf("[SERVER] WARNING: Unknown message type: %s from %s\n", msg.Type, msg.Server)
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleServeFile(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	filePath := vars["filePath"]
+
+	localPath := filepath.Join(s.config.Server.SyncDir, filePath)
+	http.ServeFile(w, r, localPath)
+}
+
+func (s *Server) handleReceiveFile(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	filePath := vars["filePath"]
+
+	localPath := filepath.Join(s.config.Server.SyncDir, filePath)
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	file, err := os.Create(localPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	if _, err := io.Copy(file, r.Body); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) checkAndDownloadMissingFiles(peerName string, remoteFiles []p2p.FileInfo) error {
+	fmt.Printf("[SERVER] Checking for missing files from peer %s\n", peerName)
+
+	localFiles, err := s.sync.GetLocalFiles()
+	if err != nil {
+		return fmt.Errorf("failed to get local files: %w", err)
+	}
+
+	// Create map of local files for quick lookup
+	localFileMap := make(map[string]p2p.FileInfo)
+	for _, file := range localFiles {
+		localFileMap[file.Path] = file
+	}
+
+	filesToDownload := 0
+
+	// Check each remote file
+	for _, remoteFile := range remoteFiles {
+		localFile, exists := localFileMap[remoteFile.Path]
+
+		if !exists {
+			// File doesn't exist locally - download it
+			fmt.Printf("[SERVER] File missing locally: %s - downloading from %s\n", remoteFile.Path, peerName)
+			if err := s.sync.DownloadFile(peerName, remoteFile.Path); err != nil {
+				fmt.Printf("[SERVER] ERROR: Failed to download %s: %v\n", remoteFile.Path, err)
+			} else {
+				fmt.Printf("[SERVER] Successfully downloaded: %s\n", remoteFile.Path)
+				filesToDownload++
+			}
+		} else if localFile.Hash != remoteFile.Hash {
+			// File exists but hash differs - could be newer version
+			fmt.Printf("[SERVER] File hash mismatch for %s (local: %s, remote: %s)\n",
+				remoteFile.Path, localFile.Hash[:8]+"...", remoteFile.Hash[:8]+"...")
+
+			// For simplicity, we'll download the remote version if it's newer
+			if remoteFile.Modified.After(localFile.Modified) {
+				fmt.Printf("[SERVER] Remote file is newer, downloading: %s\n", remoteFile.Path)
+				if err := s.sync.DownloadFile(peerName, remoteFile.Path); err != nil {
+					fmt.Printf("[SERVER] ERROR: Failed to download updated %s: %v\n", remoteFile.Path, err)
+				} else {
+					fmt.Printf("[SERVER] Successfully updated: %s\n", remoteFile.Path)
+					filesToDownload++
+				}
+			}
+		}
+	}
+
+	if filesToDownload == 0 {
+		fmt.Printf("[SERVER] No files to download from peer %s\n", peerName)
+	} else {
+		fmt.Printf("[SERVER] Downloaded %d files from peer %s\n", filesToDownload, peerName)
+	}
+
+	return nil
+}
+
+func (s *Server) applyDeletionsFromPeer(peerName string, deletedFiles []p2p.FileInfo) error {
+	fmt.Printf("[SERVER] Applying %d deletions from peer %s\n", len(deletedFiles), peerName)
+
+	deletionsApplied := 0
+
+	for _, deletedFile := range deletedFiles {
+		fmt.Printf("[SERVER] Applying deletion: %s\n", deletedFile.Path)
+		if err := s.sync.ApplyDeletion(peerName, deletedFile.Path); err != nil {
+			fmt.Printf("[SERVER] ERROR: Failed to apply deletion of %s: %v\n", deletedFile.Path, err)
+		} else {
+			fmt.Printf("[SERVER] Successfully applied deletion: %s\n", deletedFile.Path)
+			deletionsApplied++
+		}
+	}
+
+	if deletionsApplied == 0 {
+		fmt.Printf("[SERVER] No deletions applied from peer %s\n", peerName)
+	} else {
+		fmt.Printf("[SERVER] Applied %d deletions from peer %s\n", deletionsApplied, peerName)
+	}
+
+	return nil
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+}

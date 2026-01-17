@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>History - File Sync</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>File History - {{.}}</h1>
+            <nav>
+                <a href="/">Dashboard</a>
+                <a href="/files">Files</a>
+                <a href="/history">History</a>
+            </nav>
+        </header>
+
+        <main>
+            <div class="history-controls">
+                <input type="text" id="file-path" placeholder="Enter file path..." />
+                <button id="search-btn">Search History</button>
+            </div>
+
+            <div class="history-list">
+                <table id="history-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>File</th>
+                            <th>Action</th>
+                            <th>Server</th>
+                            <th>Size</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-body">
+                        <tr>
+                            <td colspan="5">Enter a file path to view its history...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/history.js"></script>
+</body>
+</html>

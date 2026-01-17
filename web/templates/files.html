@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Files - File Sync</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>File Browser</h1>
+            <nav>
+                <a href="/">Dashboard</a>
+                <a href="/files">Files</a>
+                <a href="/history">History</a>
+            </nav>
+        </header>
+
+        <main>
+            <div class="server-selector">
+                <label for="server-select">Server:</label>
+                <select id="server-select">
+                    <option value="{{.ServerName}}">{{.ServerName}} (Local)</option>
+                    {{range $name, $peer := .Peers}}
+                    <option value="{{$name}}">{{$name}}</option>
+                    {{end}}
+                </select>
+            </div>
+
+            <div class="file-list">
+                <table id="files-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Size</th>
+                            <th>Modified</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="files-body">
+                        <tr>
+                            <td colspan="4">Loading files...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/files.js"></script>
+</body>
+</html>

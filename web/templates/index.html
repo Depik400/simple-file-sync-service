@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Sync - {{.}}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>File Sync Server: {{.}}</h1>
+            <nav>
+                <a href="/">Dashboard</a>
+                <a href="/files">Files</a>
+                <a href="/history">History</a>
+            </nav>
+        </header>
+
+        <main>
+            <div class="dashboard">
+                <div class="card">
+                    <h2>Server Status</h2>
+                    <div id="server-status">Loading...</div>
+                </div>
+
+                <div class="card">
+                    <h2>Connected Peers</h2>
+                    <div id="peers-list">Loading...</div>
+                </div>
+
+                <div class="card">
+                    <h2>Recent Activity</h2>
+                    <div id="recent-changes">Loading...</div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>

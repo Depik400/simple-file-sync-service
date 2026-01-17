@@ -1,0 +1,23 @@
+server:
+  name: "server-2"
+  host: "localhost"
+  port: 7071
+  web_port: 7071
+  sync_dir: "./examples/sync_data_server2"
+
+peers:
+  - name: "server-1"
+    host: "localhost"
+    port: 8090
+
+sync:
+  interval: 3
+  max_concurrent_transfers: 5
+  chunk_size: 1048576
+
+database:
+  path: "./examples/file_sync_server2.db"
+
+logging:
+  level: "info"
+  file: "./examples/logs/file_sync_server2.log"

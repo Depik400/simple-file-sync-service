@@ -1,0 +1,26 @@
+server:
+  name: "server-1"
+  host: "localhost"
+  port: 8080
+  web_port: 8081
+  sync_dir: "./sync_data"
+
+peers:
+  - name: "server-2"
+    host: "localhost"
+    port: 8082
+  - name: "server-3"
+    host: "localhost"
+    port: 8083
+
+sync:
+  interval: 30  # seconds
+  max_concurrent_transfers: 5
+  chunk_size: 1048576  # 1MB
+
+database:
+  path: "./file_sync.db"
+
+logging:
+  level: "info"
+  file: "./logs/file_sync.log"

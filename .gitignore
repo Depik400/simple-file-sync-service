@@ -1,0 +1,115 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+file-sync
+bin/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (uncomment if using vendor)
+# vendor/
+
+# Go workspace file
+go.work
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Log files
+*.log
+logs/
+examples/logs/
+
+# PID files
+*.pid
+
+# Sync data directories (test files that shouldn't be committed)
+sync_data*/
+examples/sync_data*/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.bak
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.nfs*
+
+# JetBrains IDEs
+.idea/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Cursor (if different from VS Code)
+.cursor/
+
+# Build artifacts
+dist/
+build/
+
+# Runtime configuration files (create your own based on templates)
+# Uncomment if you want to ignore local config files:
+# config.yaml
+# examples/config-server*.yaml
+
+# Documentation generated files
+docs/_build/
+*.pdf
+*.docx
+
+# Backup files
+*.orig
+*.rej
