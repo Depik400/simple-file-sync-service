@@ -225,6 +225,14 @@ func (s *Server) handleSyncMessage(w http.ResponseWriter, r *http.Request) {
 			fmt.Printf("[SERVER] ERROR: Failed to sync files from %s: %v\n", msg.Server, err)
 		}
 
+	case "request_file_list":
+		fmt.Printf("[SERVER] Processing file list request from peer %s\n", msg.Server)
+
+		// Send our current file list back to the requesting peer
+		if err := s.sendFileListToPeer(msg.Server); err != nil {
+			fmt.Printf("[SERVER] ERROR: Failed to send file list to %s: %v\n", msg.Server, err)
+		}
+
 	case "file_deletions":
 		fmt.Printf("[SERVER] Processing file deletions from peer %s\n", msg.Server)
 
@@ -282,11 +290,38 @@ func (s *Server) handleSyncMessage(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func (s *Server) sendFileListToPeer(peerName string) error {
+	fmt.Printf("[SERVER] Sending file list to peer: %s\n", peerName)
+
+	// Get current local files
+	localFiles, err := s.sync.GetCurrentFiles()
+	if err != nil {
+		return fmt.Errorf("failed to scan local directory: %w", err)
+	}
+
+	// Send file list to the specific peer
+	return s.sync.GetP2PNetwork().SendFileList(peerName, localFiles)
+}
+
 func (s *Server) handleServeFile(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	filePath := vars["filePath"]
 
+	// Get current working directory
+	cwd, _ := os.Getwd()
+	fmt.Printf("[SERVER] CWD: %s, SyncDir: %s\n", cwd, s.config.Server.SyncDir)
+
 	localPath := filepath.Join(s.config.Server.SyncDir, filePath)
+	fmt.Printf("[SERVER] Serving file: %s (local path: %s, sync_dir: %s)\n", filePath, localPath, s.config.Server.SyncDir)
+
+	// Check if file exists
+	if _, err := os.Stat(localPath); os.IsNotExist(err) {
+		fmt.Printf("[SERVER] ERROR: File not found: %s (sync_dir: %s, filePath: %s)\n", localPath, s.config.Server.SyncDir, filePath)
+		http.NotFound(w, r)
+		return
+	}
+
+	fmt.Printf("[SERVER] File exists, serving: %s\n", localPath)
 	http.ServeFile(w, r, localPath)
 }
 

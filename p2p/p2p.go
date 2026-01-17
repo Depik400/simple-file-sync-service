@@ -52,9 +52,11 @@ func (p *P2PNetwork) Start() error {
 
 	// Initialize peers from config
 	fmt.Printf("[P2P] Initializing %d peers from config\n", len(p.config.Peers))
-	for _, peer := range p.config.Peers {
-		p.peers[peer.Name] = &peer
-		fmt.Printf("[P2P] Added peer: %s (%s:%d)\n", peer.Name, peer.Host, peer.Port)
+	for name, peer := range p.config.Peers {
+		peerConfig := peer
+		peerConfig.Name = name // Set name from map key
+		p.peers[name] = &peerConfig
+		fmt.Printf("[P2P] Added peer: %s (%s:%d)\n", name, peer.Host, peer.Port)
 	}
 
 	// Start health check routine
@@ -116,6 +118,19 @@ func (p *P2PNetwork) BroadcastFileList(files []FileInfo) error {
 	return p.broadcastMessage(message)
 }
 
+func (p *P2PNetwork) SendFileList(peerName string, files []FileInfo) error {
+	fmt.Printf("[P2P] Sending file list with %d files to peer %s\n", len(files), peerName)
+
+	message := SyncMessage{
+		Type:      "file_list",
+		Server:    p.config.Server.Name,
+		Data:      map[string]interface{}{"files": files},
+		Timestamp: time.Now(),
+	}
+
+	return p.sendMessage(peerName, message)
+}
+
 func (p *P2PNetwork) BroadcastDeletions(deletedFiles []FileInfo) error {
 	if p.demoMode {
 		fmt.Printf("[P2P] DEMO: Would broadcast %d deletions\n", len(deletedFiles))
@@ -174,8 +189,8 @@ func (p *P2PNetwork) RequestFileWithOffset(serverName, filePath string, offset i
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		resp.Body.Close()
-		fmt.Printf("[P2P] ERROR: Server %s returned status %d for file %s (took %v)\n",
-			serverName, resp.StatusCode, filePath, duration)
+		fmt.Printf("[P2P] ERROR: Server %s req %s returned status %d for file %s (took %v)\n",
+			serverName, url, resp.StatusCode, filePath, duration)
 		return nil, 0, fmt.Errorf("server returned status: %d", resp.StatusCode)
 	}
 
@@ -267,6 +282,51 @@ func (p *P2PNetwork) broadcastMessage(message SyncMessage) error {
 	}
 
 	return nil
+}
+
+func (p *P2PNetwork) sendMessage(peerName string, message SyncMessage) error {
+	if p.demoMode {
+		fmt.Printf("[P2P] DEMO: Would send %s message to peer %s\n", message.Type, peerName)
+		return nil
+	}
+
+	peer, exists := p.peers[peerName]
+	if !exists {
+		return fmt.Errorf("peer %s not found", peerName)
+	}
+
+	data, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+
+	fmt.Printf("[P2P] Sending %s message to peer %s\n", message.Type, peerName)
+
+	url := fmt.Sprintf("http://%s/sync", peer.GetAddr())
+	start := time.Now()
+	resp, err := p.httpClient.Post(url, "application/json", bytes.NewReader(data))
+	duration := time.Since(start)
+
+	if err != nil {
+		fmt.Printf("[P2P] ERROR: Failed to send %s message to %s: %v (took %v)\n",
+			message.Type, peerName, err, duration)
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("[P2P] WARNING: Peer %s returned status %d for %s message (took %v)\n",
+			peerName, resp.StatusCode, message.Type, duration)
+	} else {
+		fmt.Printf("[P2P] Successfully sent %s message to %s (took %v)\n",
+			message.Type, peerName, duration)
+	}
+
+	return nil
+}
+
+func (p *P2PNetwork) SendSyncMessage(peerName string, message SyncMessage) error {
+	return p.sendMessage(peerName, message)
 }
 
 func (p *P2PNetwork) AddPeer(peer config.PeerConfig) {

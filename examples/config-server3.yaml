@@ -1,17 +1,17 @@
 server:
-  name: "server-2"
+  name: "server-3"
   host: "localhost"
-  port: 7071
-  web_port: 7071
-  sync_dir: "./examples/sync_data_server2"
+  port: 7073
+  web_port: 7073
+  sync_dir: "./examples/sync_data_server3"
 
 peers:
   server-1:
     host: "localhost"
     port: 8090
-  server-3:
+  server-2:
     host: "localhost"
-    port: 7073
+    port: 7071
 
 sync:
   interval: 30
@@ -19,8 +19,8 @@ sync:
   chunk_size: 8388608  # 8MB chunks for large files
 
 database:
-  path: "./examples/file_sync_server2.db"
+  path: "./examples/file_sync_server3.db"
 
 logging:
   level: "info"
-  file: "./examples/logs/file_sync_server2.log"
+  file: "./examples/logs/file_sync_server3.log"

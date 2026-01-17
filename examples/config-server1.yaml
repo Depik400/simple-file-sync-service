@@ -6,12 +6,15 @@ server:
   sync_dir: "./examples/sync_data_server1"
 
 peers:
-  - name: "server-2"
+  server-2:
     host: "localhost"
     port: 7071
-
+  server-3:
+    host: "localhost"
+    port: 7073
+    
 sync:
-  interval: 3  # seconds
+  interval: 30  # seconds
   max_concurrent_transfers: 5
   chunk_size: 8388608  # 8MB chunks for large files
 

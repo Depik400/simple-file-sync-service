@@ -45,6 +45,7 @@ print_status "Creating directories..."
 mkdir -p "$SCRIPT_DIR/logs"
 mkdir -p "$SCRIPT_DIR/sync_data_server1"
 mkdir -p "$SCRIPT_DIR/sync_data_server2"
+mkdir -p "$SCRIPT_DIR/sync_data_server3"
 
 # Cleanup function
 cleanup() {
@@ -56,6 +57,10 @@ cleanup() {
     if [ -f "$SCRIPT_DIR/server2.pid" ]; then
         kill $(cat "$SCRIPT_DIR/server2.pid") 2>/dev/null || true
         rm -f "$SCRIPT_DIR/server2.pid"
+    fi
+    if [ -f "$SCRIPT_DIR/server3.pid" ]; then
+        kill $(cat "$SCRIPT_DIR/server3.pid") 2>/dev/null || true
+        rm -f "$SCRIPT_DIR/server3.pid"
     fi
     print_status "Servers stopped"
 }
@@ -104,8 +109,8 @@ show_servers() {
     echo ""
     print_info "=== File Sync Servers Running ==="
     echo "Server 1:"
-    echo "  Web UI: http://localhost:8081"
-    echo "  P2P Port: 8080"
+    echo "  Web UI: http://localhost:7071"
+    echo "  P2P Port: 7071"
     echo "  Sync Dir: $SCRIPT_DIR/sync_data_server1"
     echo "  Logs: $SCRIPT_DIR/logs/server1.log"
     if [ -f "$SCRIPT_DIR/server1.pid" ]; then
@@ -114,8 +119,8 @@ show_servers() {
 
     echo ""
     echo "Server 2:"
-    echo "  Web UI: http://localhost:8083"
-    echo "  P2P Port: 8082"
+    echo "  Web UI: http://localhost:8090"
+    echo "  P2P Port: 8090"
     echo "  Sync Dir: $SCRIPT_DIR/sync_data_server2"
     echo "  Logs: $SCRIPT_DIR/logs/server2.log"
     if [ -f "$SCRIPT_DIR/server2.pid" ]; then
@@ -123,10 +128,20 @@ show_servers() {
     fi
 
     echo ""
+    echo "Server 3:"
+    echo "  Web UI: http://localhost:7073"
+    echo "  P2P Port: 7073"
+    echo "  Sync Dir: $SCRIPT_DIR/sync_data_server3"
+    echo "  Logs: $SCRIPT_DIR/logs/server3.log"
+    if [ -f "$SCRIPT_DIR/server3.pid" ]; then
+        echo "  PID: $(cat "$SCRIPT_DIR/server3.pid")"
+    fi
+
+    echo ""
     print_info "=== Testing ==="
     echo "1. Create files in sync_data_server1/"
     echo "2. Watch logs for synchronization"
-    echo "3. Check files appear in sync_data_server2/"
+    echo "3. Check files appear in sync_data_server2/ and sync_data_server3/"
     echo ""
     print_warning "Press Ctrl+C to stop all servers"
 }
@@ -147,14 +162,17 @@ main() {
     start_server 2 &
     SERVER2_PID=$!
 
+    start_server 3 &
+    SERVER3_PID=$!
     # Wait a bit for both servers to initialize
     print_info "Waiting for servers to initialize..."
     sleep 5
 
-    # Check if both servers started successfully
-    if [ -f "$SCRIPT_DIR/server1.pid" ] && [ -f "$SCRIPT_DIR/server2.pid" ] &&
+    # Check if all servers started successfully
+    if [ -f "$SCRIPT_DIR/server1.pid" ] && [ -f "$SCRIPT_DIR/server2.pid" ] && [ -f "$SCRIPT_DIR/server3.pid" ] &&
        kill -0 $(cat "$SCRIPT_DIR/server1.pid") 2>/dev/null &&
-       kill -0 $(cat "$SCRIPT_DIR/server2.pid") 2>/dev/null; then
+       kill -0 $(cat "$SCRIPT_DIR/server2.pid") 2>/dev/null &&
+       kill -0 $(cat "$SCRIPT_DIR/server3.pid") 2>/dev/null; then
 
         # Show status
         show_servers
@@ -175,6 +193,10 @@ main() {
             fi
             if [ -f "$SCRIPT_DIR/server2.pid" ] && ! kill -0 $(cat "$SCRIPT_DIR/server2.pid") 2>/dev/null; then
                 print_error "Server 2 stopped unexpectedly"
+                exit 1
+            fi
+            if [ -f "$SCRIPT_DIR/server3.pid" ] && ! kill -0 $(cat "$SCRIPT_DIR/server3.pid") 2>/dev/null; then
+                print_error "Server 3 stopped unexpectedly"
                 exit 1
             fi
         done
@@ -199,14 +221,19 @@ show_demo_info() {
     echo "  cd $PROJECT_ROOT"
     echo "  ./file-sync examples/config-server2.yaml"
     echo ""
+    echo "Terminal 3 - Server 3:"
+    echo "  cd $PROJECT_ROOT"
+    echo "  ./file-sync examples/config-server3.yaml"
+    echo ""
     print_info "Server URLs when running:"
-    echo "  Server 1 Web UI: http://localhost:9101"
-    echo "  Server 2 Web UI: http://localhost:9103"
+    echo "  Server 1 Web UI: http://localhost:7071"
+    echo "  Server 2 Web UI: http://localhost:8090"
+    echo "  Server 3 Web UI: http://localhost:7073"
     echo ""
     print_info "Test synchronization:"
     echo "  1. Create files in examples/sync_data_server1/"
     echo "  2. Watch server logs for sync messages"
-    echo "  3. Files should appear in examples/sync_data_server2/"
+    echo "  3. Files should appear in examples/sync_data_server2/ and sync_data_server3/"
     echo ""
     print_info "Example test files are already created:"
     echo "  examples/sync_data_server1/welcome.txt"

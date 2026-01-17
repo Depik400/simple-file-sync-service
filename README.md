@@ -72,6 +72,9 @@ make run-multi
 
 # Terminal 2 - Server 2
 ./file-sync examples/config-server2.yaml
+
+# Terminal 3 - Server 3
+./file-sync examples/config-server3.yaml
 ```
 
 #### Демонстрация логики синхронизации
@@ -99,8 +102,23 @@ make demo-test
 Запускает серверы в demo режиме, создает тестовый файл и показывает процесс синхронизации.
 
 #### Готовые конфигурации
-- **Server 1**: http://localhost:8090 (P2P: 8090)
-- **Server 2**: http://localhost:7071 (P2P: 7071)
+- **Server 1**: http://localhost:7071 (P2P: 7071)
+- **Server 2**: http://localhost:8090 (P2P: 8090)
+- **Server 3**: http://localhost:7073 (P2P: 7073)
+
+#### Формат конфигурации пиров
+
+Пиры определяются в формате map, где ключ - имя сервера:
+
+```yaml
+peers:
+  server-1:
+    host: "localhost"
+    port: 8090
+  server-2:
+    host: "localhost"
+    port: 7071
+```
 
 Тестовые файлы уже созданы в `examples/sync_data_server1/`
 

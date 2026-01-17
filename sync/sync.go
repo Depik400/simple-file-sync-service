@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"file-sync/config"
@@ -139,6 +140,8 @@ func (fs *FileSync) performSync() error {
 func (fs *FileSync) scanDirectory(dir string) ([]p2p.FileInfo, error) {
 	var files []p2p.FileInfo
 
+	fmt.Printf("[SYNC] Scanning directory: %s\n", dir)
+
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -148,10 +151,19 @@ func (fs *FileSync) scanDirectory(dir string) ([]p2p.FileInfo, error) {
 			return nil
 		}
 
+		fmt.Printf("[SYNC] Found file: %s\n", path)
+
 		// Get relative path
 		relPath, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err
+		}
+
+		// Skip certain files that shouldn't be synced
+		fileName := filepath.Base(path)
+		if fs.shouldSkipFile(fileName) {
+			fmt.Printf("[SYNC] Skipping file: %s (filtered out)\n", fileName)
+			return nil
 		}
 
 		// Calculate hash
@@ -167,11 +179,47 @@ func (fs *FileSync) scanDirectory(dir string) ([]p2p.FileInfo, error) {
 			Modified: info.ModTime(),
 		}
 
+		fmt.Printf("[SYNC] Added to sync list: %s (hash: %s, size: %d)\n", relPath, hash[:8]+"...", info.Size())
 		files = append(files, fileInfo)
 		return nil
 	})
 
+	fmt.Printf("[SYNC] Scan completed, found %d files\n", len(files))
 	return files, err
+}
+
+// GetCurrentFiles returns the current local files
+func (fs *FileSync) GetCurrentFiles() ([]p2p.FileInfo, error) {
+	return fs.scanDirectory(fs.config.Server.SyncDir)
+}
+
+// GetP2PNetwork returns the P2P network instance
+func (fs *FileSync) GetP2PNetwork() *p2p.P2PNetwork {
+	return fs.p2p
+}
+
+func (fs *FileSync) shouldSkipFile(fileName string) bool {
+	// Skip PID files
+	if strings.HasSuffix(fileName, ".pid") {
+		return true
+	}
+
+	// Skip hidden files
+	if strings.HasPrefix(fileName, ".") {
+		return true
+	}
+
+	// Skip temporary files
+	if strings.HasSuffix(fileName, ".tmp") || strings.HasSuffix(fileName, ".temp") {
+		return true
+	}
+
+	// Skip lock files
+	if strings.HasSuffix(fileName, ".lock") {
+		return true
+	}
+
+	return false
 }
 
 func (fs *FileSync) calculateFileHash(filePath string) (string, error) {
@@ -367,11 +415,31 @@ func (fs *FileSync) syncFromPeers() error {
 
 	fmt.Printf("[SYNC] Checking %d peers for new files\n", len(peers))
 
-	// This is a placeholder - in the current implementation,
-	// we rely on peers to initiate downloads when they detect missing files
-	// A better approach would be to query peers for their file lists
+	// Query each peer for their file lists
+	for peerName := range peers {
+		if err := fs.requestFileListFromPeer(peerName); err != nil {
+			fmt.Printf("[SYNC] WARNING: Failed to get file list from peer %s: %v\n", peerName, err)
+			// Continue with other peers
+		}
+	}
 
 	return nil
+}
+
+func (fs *FileSync) requestFileListFromPeer(peerName string) error {
+	fmt.Printf("[SYNC] Requesting file list from peer: %s\n", peerName)
+
+	// Send a request for file list to the peer
+	// This would trigger the peer to send us their current file list
+	// For now, we'll implement this by sending a special sync message
+
+	syncMsg := p2p.SyncMessage{
+		Server: fs.config.Server.Name,
+		Type:   "request_file_list",
+		Data:   map[string]interface{}{},
+	}
+
+	return fs.p2p.SendSyncMessage(peerName, syncMsg)
 }
 
 func (fs *FileSync) RequestSyncFromPeer(peerName string) error {

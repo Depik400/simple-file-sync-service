@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -22,9 +23,9 @@ type PeerConfig struct {
 }
 
 type SyncConfig struct {
-	Interval             int `yaml:"interval"`
+	Interval               int `yaml:"interval"`
 	MaxConcurrentTransfers int `yaml:"max_concurrent_transfers"`
-	ChunkSize           int `yaml:"chunk_size"`
+	ChunkSize              int `yaml:"chunk_size"`
 }
 
 type DatabaseConfig struct {
@@ -37,11 +38,11 @@ type LoggingConfig struct {
 }
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Peers    []PeerConfig   `yaml:"peers"`
-	Sync     SyncConfig     `yaml:"sync"`
-	Database DatabaseConfig `yaml:"database"`
-	Logging  LoggingConfig  `yaml:"logging"`
+	Server   ServerConfig          `yaml:"server"`
+	Peers    map[string]PeerConfig `yaml:"peers"`
+	Sync     SyncConfig            `yaml:"sync"`
+	Database DatabaseConfig        `yaml:"database"`
+	Logging  LoggingConfig         `yaml:"logging"`
 }
 
 func LoadConfig(configPath string) (*Config, error) {
@@ -57,6 +58,11 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to decode config: %w", err)
 	}
 
+	// Normalize relative paths to absolute paths
+	if err := config.NormalizePaths(); err != nil {
+		return nil, fmt.Errorf("failed to normalize paths: %w", err)
+	}
+
 	return &config, nil
 }
 
@@ -66,6 +72,37 @@ func (c *Config) GetServerAddr() string {
 
 func (c *Config) GetWebAddr() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.WebPort)
+}
+
+func (c *Config) NormalizePaths() error {
+	// Convert relative sync_dir to absolute path
+	if !filepath.IsAbs(c.Server.SyncDir) {
+		absPath, err := filepath.Abs(c.Server.SyncDir)
+		if err != nil {
+			return fmt.Errorf("failed to resolve sync_dir path: %w", err)
+		}
+		c.Server.SyncDir = absPath
+	}
+
+	// Convert relative database path to absolute path
+	if !filepath.IsAbs(c.Database.Path) {
+		absPath, err := filepath.Abs(c.Database.Path)
+		if err != nil {
+			return fmt.Errorf("failed to resolve database path: %w", err)
+		}
+		c.Database.Path = absPath
+	}
+
+	// Convert relative log file path to absolute path
+	if !filepath.IsAbs(c.Logging.File) {
+		absPath, err := filepath.Abs(c.Logging.File)
+		if err != nil {
+			return fmt.Errorf("failed to resolve log file path: %w", err)
+		}
+		c.Logging.File = absPath
+	}
+
+	return nil
 }
 
 func (p *PeerConfig) GetAddr() string {
