@@ -15,6 +15,7 @@ import (
 	"file-sync/config"
 	"file-sync/db"
 	"file-sync/p2p"
+	"file-sync/ui"
 )
 
 type FileSync struct {
@@ -22,6 +23,7 @@ type FileSync struct {
 	db            *db.Database
 	p2p           *p2p.P2PNetwork
 	previousFiles map[string]p2p.FileInfo // Track previous file state
+	uiManager     *ui.UIManager           // Optional UI manager
 }
 
 func NewFileSync(cfg *config.Config, database *db.Database, p2pNet *p2p.P2PNetwork) *FileSync {
@@ -30,7 +32,13 @@ func NewFileSync(cfg *config.Config, database *db.Database, p2pNet *p2p.P2PNetwo
 		db:            database,
 		p2p:           p2pNet,
 		previousFiles: make(map[string]p2p.FileInfo),
+		uiManager:     nil, // Will be set later if UI mode is enabled
 	}
+}
+
+// SetUIManager sets the UI manager for this sync service
+func (fs *FileSync) SetUIManager(uiManager *ui.UIManager) {
+	fs.uiManager = uiManager
 }
 
 func (fs *FileSync) Start() error {
@@ -337,6 +345,18 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 	fmt.Printf("[SYNC] Starting parallel download of %s (size: %d bytes, chunk size: %d bytes, concurrency: %d)\n",
 		filePath, fileSize, chunkSize, maxConcurrency)
 
+	// Update UI with download start
+	if fs.uiManager != nil {
+		fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.DownloadStatus{
+			FilePath:   filePath,
+			ServerName: serverName,
+			Status:     "downloading",
+			Progress:   0,
+			TotalBytes: fileSize,
+			StartTime:  time.Now(),
+		})
+	}
+
 	// Calculate chunk ranges
 	var ranges []chunkRange
 
@@ -526,6 +546,21 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 		totalDownloaded += int64(len(result.data))
 		fmt.Printf("[SYNC] Chunk %d-%d written (%d/%d bytes total, %d/%d chunks)\n",
 			result.range_.start, result.range_.end, totalDownloaded, fileSize, chunksReceived, len(ranges))
+
+		// Update UI with progress
+		if fs.uiManager != nil {
+			progress := float64(totalDownloaded) / float64(fileSize) * 100
+			fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.DownloadStatus{
+				FilePath:   filePath,
+				ServerName: serverName,
+				Status:     "downloading",
+				Progress:   progress,
+				Speed:      0, // TODO: calculate actual speed
+				TotalBytes: fileSize,
+				Downloaded: totalDownloaded,
+				StartTime:  time.Now(), // TODO: track actual start time
+			})
+		}
 	}
 
 	fmt.Printf("[SYNC] Finished receiving chunks: %d received, %d expected\n", chunksReceived, len(ranges))
@@ -534,6 +569,17 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 	if hasError {
 		file.Close()
 		os.Remove(tempPath) // Clean up temp file on error
+
+		// Update UI with error
+		if fs.uiManager != nil {
+			fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.DownloadStatus{
+				FilePath:   filePath,
+				ServerName: serverName,
+				Status:     "failed",
+				Error:      fmt.Sprintf("Download failed: %v", errorDetails),
+			})
+		}
+
 		return fmt.Errorf("download failed due to chunk errors: %v", errorDetails)
 	}
 
@@ -587,6 +633,18 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 	}
 
 	fmt.Printf("[SYNC] Parallel download completed successfully: %s (%d bytes)\n", filePath, totalDownloaded)
+
+	// Update UI with completion
+	if fs.uiManager != nil {
+		fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.DownloadStatus{
+			FilePath:   filePath,
+			ServerName: serverName,
+			Status:     "completed",
+			Progress:   100,
+			TotalBytes: fileSize,
+			Downloaded: totalDownloaded,
+		})
+	}
 
 	// Verify file size
 	if info, err := os.Stat(localPath); err != nil {
