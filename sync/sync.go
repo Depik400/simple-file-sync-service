@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"file-sync/config"
@@ -410,6 +411,49 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 	// Semaphore to limit concurrent downloads
 	sem := make(chan struct{}, maxConcurrency)
 
+	// Atomic counter for total downloaded bytes
+	var totalDownloadedAtomic int64
+	stopUIUpdates := make(chan struct{}) // Signal to stop UI updates
+	uiUpdateDone := make(chan struct{})  // Signal when UI updates are done
+
+	// Start UI update goroutine
+	go func() {
+		defer close(uiUpdateDone)
+		ticker := time.NewTicker(500 * time.Millisecond) // Update UI every 500ms
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				currentDownloaded := atomic.LoadInt64(&totalDownloadedAtomic)
+				if currentDownloaded > 0 {
+					elapsed := time.Since(downloadStartTime)
+					progress := float64(currentDownloaded) / float64(fileSize) * 100
+					speed := int64(0)
+					if elapsed.Seconds() >= 0.1 {
+						speed = int64(float64(currentDownloaded) / elapsed.Seconds())
+					}
+
+					if fs.uiManager != nil {
+						fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.TransferStatus{
+							FilePath:   filePath,
+							ServerName: serverName,
+							Status:     "active",
+							Progress:   progress,
+							Speed:      speed,
+							TotalBytes: fileSize,
+							Downloaded: currentDownloaded,
+							StartTime:  downloadStartTime,
+						})
+					}
+				}
+			case <-stopUIUpdates:
+				// Stop UI updates
+				return
+			}
+		}
+	}()
+
 	// Start download workers
 	var wg sync.WaitGroup
 	for i, r := range ranges {
@@ -465,6 +509,7 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 				n, err := bufReader.Read(chunkData[totalRead:])
 				if n > 0 {
 					totalRead += int64(n)
+					atomic.AddInt64(&totalDownloadedAtomic, int64(n))
 					logger.Debug("Worker %d read %d/%d bytes", workerID, totalRead, expectedSize)
 				}
 				if err != nil {
@@ -572,6 +617,10 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 	}
 
 	logger.Info("Finished receiving chunks: %d received, %d expected", chunksReceived, len(ranges))
+
+	// Stop UI updates
+	close(stopUIUpdates) // Stop the UI update goroutine
+	<-uiUpdateDone       // Wait for UI updates to finish
 
 	// If there was an error, clean up and return it with details
 	if hasError {
