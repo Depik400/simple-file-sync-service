@@ -1,17 +1,14 @@
 server:
-  name: "server-1"
-  host: "localhost"
-  port: 8080
-  web_port: 8081
+  name: "server-2"
+  host: "192.168.3.100"
+  port: 8082
+  web_port: 8082
   sync_dir: "./sync_data"
 
 peers:
-  - name: "server-2"
-    host: "localhost"
-    port: 8082
-  - name: "server-3"
-    host: "localhost"
-    port: 8083
+  "server-1":
+    host: "192.168.3.102"
+    port: 8080
 
 sync:
   interval: 30  # seconds
