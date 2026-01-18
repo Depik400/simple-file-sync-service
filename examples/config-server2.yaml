@@ -17,6 +17,7 @@ sync:
   interval: 30
   max_concurrent_transfers: 5
   chunk_size: 8388608  # 8MB chunks for large files
+  max_parallel_chunks: 4  # parallel chunks per file (0 = disable parallel)
 
 database:
   path: "./examples/file_sync_server2.db"

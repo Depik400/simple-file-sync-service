@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bufio"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"file-sync/config"
@@ -262,7 +264,245 @@ func (fs *FileSync) recordLocalChanges(files []p2p.FileInfo) error {
 	return nil
 }
 
+func (fs *FileSync) DownloadFileParallel(serverName, filePath string) error {
+	return fs.downloadFileWithConcurrency(serverName, filePath, fs.config.Sync.MaxParallelChunks)
+}
+
+func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, maxConcurrency int) error {
+	localPath := filepath.Join(fs.config.Server.SyncDir, filePath)
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		return err
+	}
+
+	// First, get file size by requesting a small range
+	testReader, fileSize, err := fs.p2p.RequestFileRange(serverName, filePath, 0, 0)
+	if err != nil {
+		return fmt.Errorf("failed to get file size: %w", err)
+	}
+	testReader.Close()
+
+	if fileSize == 0 {
+		return fmt.Errorf("file size is 0")
+	}
+
+	// Calculate adaptive chunk size based on file size and concurrency
+	chunkSize := fs.calculateAdaptiveChunkSize(fileSize, maxConcurrency)
+	fmt.Printf("[SYNC] Starting parallel download of %s (size: %d bytes, chunk size: %d bytes, concurrency: %d)\n",
+		filePath, fileSize, chunkSize, maxConcurrency)
+
+	// Calculate chunk ranges
+	var ranges []chunkRange
+
+	if maxConcurrency <= 1 || fileSize <= chunkSize {
+		// Single chunk download
+		ranges = []chunkRange{{start: 0, end: fileSize - 1}}
+	} else {
+		// Multi-chunk parallel download
+		for start := int64(0); start < fileSize; start += chunkSize {
+			end := start + chunkSize - 1
+			if end >= fileSize {
+				end = fileSize - 1
+			}
+			ranges = append(ranges, chunkRange{start: start, end: end})
+		}
+	}
+
+	fmt.Printf("[SYNC] File divided into %d chunks\n", len(ranges))
+
+	// Create temporary file
+	tempPath := localPath + ".tmp"
+	file, err := os.Create(tempPath)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer file.Close()
+
+	// Pre-allocate file space
+	if err := file.Truncate(fileSize); err != nil {
+		return fmt.Errorf("failed to pre-allocate file: %w", err)
+	}
+
+	// Channel for chunk results
+	type chunkResult struct {
+		range_ chunkRange
+		data   []byte
+		err    error
+	}
+
+	results := make(chan chunkResult, len(ranges))
+
+	// Semaphore to limit concurrent downloads
+	sem := make(chan struct{}, maxConcurrency)
+
+	// Start download workers
+	var wg sync.WaitGroup
+	for _, r := range ranges {
+		wg.Add(1)
+		go func(cr chunkRange) {
+			defer wg.Done()
+
+			// Acquire semaphore
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			fmt.Printf("[SYNC] Downloading chunk %d-%d (%d bytes)\n",
+				cr.start, cr.end, cr.end-cr.start+1)
+
+			reader, _, err := fs.p2p.RequestFileRange(serverName, filePath, cr.start, cr.end)
+			if err != nil {
+				results <- chunkResult{range_: cr, err: err}
+				return
+			}
+			defer reader.Close()
+
+			// Pre-allocate buffer with exact size for better performance
+			expectedSize := cr.end - cr.start + 1
+			chunkData := make([]byte, expectedSize)
+
+			// Read data with optimized buffering
+			totalRead := int64(0)
+			bufReader := bufio.NewReaderSize(reader, 1*1024*1024) // 1MB read buffer
+
+			for totalRead < expectedSize {
+				n, err := bufReader.Read(chunkData[totalRead:])
+				if n > 0 {
+					totalRead += int64(n)
+				}
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					results <- chunkResult{range_: cr, err: err}
+					return
+				}
+			}
+
+			if totalRead != expectedSize {
+				results <- chunkResult{range_: cr, err: fmt.Errorf("read size mismatch: expected %d, got %d", expectedSize, totalRead)}
+				return
+			}
+
+			results <- chunkResult{range_: cr, data: chunkData}
+		}(r)
+	}
+
+	// Close results channel when all workers are done
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect and write results
+	totalDownloaded := int64(0)
+	for result := range results {
+		if result.err != nil {
+			return fmt.Errorf("failed to download chunk %d-%d: %w", result.range_.start, result.range_.end, result.err)
+		}
+
+		// Write chunk to file
+		if _, err := file.WriteAt(result.data, result.range_.start); err != nil {
+			return fmt.Errorf("failed to write chunk at offset %d: %w", result.range_.start, err)
+		}
+
+		totalDownloaded += int64(len(result.data))
+		fmt.Printf("[SYNC] Chunk %d-%d written (%d/%d bytes total)\n",
+			result.range_.start, result.range_.end, totalDownloaded, fileSize)
+	}
+
+	// Close and rename temp file
+	file.Close()
+
+	if err := os.Rename(tempPath, localPath); err != nil {
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	fmt.Printf("[SYNC] Parallel download completed: %s (%d bytes)\n", filePath, totalDownloaded)
+
+	// Verify file size
+	if info, err := os.Stat(localPath); err != nil {
+		return err
+	} else if info.Size() != fileSize {
+		return fmt.Errorf("file size mismatch: expected %d, got %d", fileSize, info.Size())
+	}
+
+	// Calculate hash for verification
+	hash, err := fs.calculateFileHash(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to calculate hash: %w", err)
+	}
+
+	// Record the download
+	if err := fs.db.RecordFileChange(filePath, hash, fileSize, time.Now(), fs.config.Server.Name, "downloaded"); err != nil {
+		fmt.Printf("[SYNC] WARNING: Failed to record download: %v\n", err)
+	}
+
+	return nil
+}
+
+type chunkRange struct {
+	start, end int64
+}
+
+// calculateAdaptiveChunkSize determines optimal chunk size based on file size and concurrency
+func (fs *FileSync) calculateAdaptiveChunkSize(fileSize int64, maxConcurrency int) int64 {
+	baseChunkSize := int64(fs.config.Sync.ChunkSize)
+
+	// For very small files, use the whole file as one chunk
+	if fileSize <= baseChunkSize {
+		return fileSize
+	}
+
+	// For large files with high concurrency, use larger chunks to reduce overhead
+	if maxConcurrency >= 4 && fileSize > 100*1024*1024 { // > 100MB
+		// Scale up chunk size for very large files
+		scaledSize := baseChunkSize * 2
+		if fileSize > 1024*1024*1024 { // > 1GB
+			scaledSize = baseChunkSize * 4
+		}
+		// Don't make chunks too large (max 128MB)
+		if scaledSize > 128*1024*1024 {
+			scaledSize = 128 * 1024 * 1024
+		}
+		return scaledSize
+	}
+
+	// For small files with low concurrency, use smaller chunks for better progress reporting
+	if maxConcurrency <= 2 && fileSize < 50*1024*1024 { // < 50MB
+		smallChunkSize := baseChunkSize / 2
+		// Don't make chunks too small (min 1MB)
+		if smallChunkSize < 1024*1024 {
+			smallChunkSize = 1024 * 1024
+		}
+		return smallChunkSize
+	}
+
+	return baseChunkSize
+}
+
 func (fs *FileSync) DownloadFile(serverName, filePath string) error {
+	// First, get file size to decide download strategy
+	reader, fileSize, err := fs.p2p.RequestFileWithOffset(serverName, filePath, 0)
+	if err != nil {
+		return err
+	}
+	reader.Close()
+
+	// Use parallel download for large files and when enabled
+	minParallelSize := int64(50 * 1024 * 1024) // 50MB minimum for parallel download
+	maxConcurrency := fs.config.Sync.MaxParallelChunks
+
+	if fileSize >= minParallelSize && maxConcurrency > 1 {
+		fmt.Printf("[SYNC] Using parallel download for large file (%d bytes)\n", fileSize)
+		return fs.downloadFileWithConcurrency(serverName, filePath, maxConcurrency)
+	} else {
+		fmt.Printf("[SYNC] Using sequential download for file (%d bytes)\n", fileSize)
+		return fs.downloadFileSequential(serverName, filePath)
+	}
+}
+
+func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 	localPath := filepath.Join(fs.config.Server.SyncDir, filePath)
 
 	// Ensure directory exists
@@ -296,15 +536,27 @@ func (fs *FileSync) DownloadFile(serverName, filePath string) error {
 	}
 	defer file.Close()
 
-	// Copy data in chunks
+	// Copy data with optimized buffering
 	chunkSize := int64(fs.config.Sync.ChunkSize)
 	totalDownloaded := existingSize
-	buffer := make([]byte, chunkSize)
+
+	// Use larger buffer for better performance (up to 64MB for large files)
+	bufferSize := chunkSize
+	if bufferSize > 64*1024*1024 { // 64MB max buffer
+		bufferSize = 64 * 1024 * 1024
+	}
+
+	// Use buffered reader for better performance
+	bufReader := io.LimitReader(reader, fileSize-existingSize)
+	buffer := make([]byte, bufferSize)
+
+	// Use buffered writer for better I/O performance
+	bufWriter := bufio.NewWriterSize(file, 4*1024*1024) // 4MB buffer
 
 	for {
-		n, err := reader.Read(buffer)
+		n, err := bufReader.Read(buffer)
 		if n > 0 {
-			if _, writeErr := file.Write(buffer[:n]); writeErr != nil {
+			if _, writeErr := bufWriter.Write(buffer[:n]); writeErr != nil {
 				return fmt.Errorf("failed to write chunk: %w", writeErr)
 			}
 			totalDownloaded += int64(n)
@@ -325,7 +577,12 @@ func (fs *FileSync) DownloadFile(serverName, filePath string) error {
 		}
 	}
 
-	fmt.Printf("[SYNC] Download completed: %s (%d bytes)\n", filePath, totalDownloaded)
+	// Flush any remaining buffered data
+	if err := bufWriter.Flush(); err != nil {
+		return fmt.Errorf("failed to flush buffer: %w", err)
+	}
+
+	fmt.Printf("[SYNC] Sequential download completed: %s (%d bytes)\n", filePath, totalDownloaded)
 
 	// Verify file size
 	if fileSize > 0 && totalDownloaded != fileSize {

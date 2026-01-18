@@ -19,21 +19,30 @@ import (
 	"github.com/gorilla/mux"
 )
 
+type downloadTask struct {
+	peerName string
+	filePath string
+}
+
 type Server struct {
 	config *config.Config
 	db     *db.Database
 	p2p    *p2p.P2PNetwork
 	sync   *sync.FileSync
 	router *mux.Router
+
+	// Queue for pending file downloads
+	downloadQueue chan downloadTask
 }
 
 func NewServer(cfg *config.Config, database *db.Database, p2pNet *p2p.P2PNetwork, syncService *sync.FileSync) *Server {
 	s := &Server{
-		config: cfg,
-		db:     database,
-		p2p:    p2pNet,
-		sync:   syncService,
-		router: mux.NewRouter(),
+		config:        cfg,
+		db:            database,
+		p2p:           p2pNet,
+		sync:          syncService,
+		router:        mux.NewRouter(),
+		downloadQueue: make(chan downloadTask, 100), // Buffer for 100 pending downloads
 	}
 
 	s.setupRoutes()
@@ -66,7 +75,38 @@ func (s *Server) setupRoutes() {
 
 func (s *Server) Start() error {
 	fmt.Printf("Starting server on %s (web + P2P API)\n", s.config.GetServerAddr())
+
+	// Start concurrent download workers
+	maxConcurrentDownloads := s.config.Sync.MaxConcurrentTransfers
+	if maxConcurrentDownloads <= 0 {
+		maxConcurrentDownloads = 3 // Default to 3 concurrent downloads
+	}
+
+	fmt.Printf("[SERVER] Starting %d concurrent download workers\n", maxConcurrentDownloads)
+	for i := 0; i < maxConcurrentDownloads; i++ {
+		go s.downloadWorker(i)
+	}
+
 	return http.ListenAndServe(s.config.GetServerAddr(), s.router)
+}
+
+func (s *Server) downloadWorker(workerID int) {
+	fmt.Printf("[SERVER] Download worker %d started\n", workerID)
+
+	for task := range s.downloadQueue {
+		fmt.Printf("[SERVER] Worker %d processing download: %s from %s\n",
+			workerID, task.filePath, task.peerName)
+
+		if err := s.sync.DownloadFile(task.peerName, task.filePath); err != nil {
+			fmt.Printf("[SERVER] ERROR: Worker %d failed to download %s: %v\n",
+				workerID, task.filePath, err)
+		} else {
+			fmt.Printf("[SERVER] Worker %d successfully downloaded: %s\n",
+				workerID, task.filePath)
+		}
+	}
+
+	fmt.Printf("[SERVER] Download worker %d stopped\n", workerID)
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -373,13 +413,13 @@ func (s *Server) checkAndDownloadMissingFiles(peerName string, remoteFiles []p2p
 		localFile, exists := localFileMap[remoteFile.Path]
 
 		if !exists {
-			// File doesn't exist locally - download it
-			fmt.Printf("[SERVER] File missing locally: %s - downloading from %s\n", remoteFile.Path, peerName)
-			if err := s.sync.DownloadFile(peerName, remoteFile.Path); err != nil {
-				fmt.Printf("[SERVER] ERROR: Failed to download %s: %v\n", remoteFile.Path, err)
-			} else {
-				fmt.Printf("[SERVER] Successfully downloaded: %s\n", remoteFile.Path)
+			// File doesn't exist locally - queue it for download
+			fmt.Printf("[SERVER] File missing locally: %s - queuing download from %s\n", remoteFile.Path, peerName)
+			select {
+			case s.downloadQueue <- downloadTask{peerName: peerName, filePath: remoteFile.Path}:
 				filesToDownload++
+			default:
+				fmt.Printf("[SERVER] WARNING: Download queue full, skipping %s\n", remoteFile.Path)
 			}
 		} else if localFile.Hash != remoteFile.Hash {
 			// File exists but hash differs - could be newer version
@@ -388,12 +428,12 @@ func (s *Server) checkAndDownloadMissingFiles(peerName string, remoteFiles []p2p
 
 			// For simplicity, we'll download the remote version if it's newer
 			if remoteFile.Modified.After(localFile.Modified) {
-				fmt.Printf("[SERVER] Remote file is newer, downloading: %s\n", remoteFile.Path)
-				if err := s.sync.DownloadFile(peerName, remoteFile.Path); err != nil {
-					fmt.Printf("[SERVER] ERROR: Failed to download updated %s: %v\n", remoteFile.Path, err)
-				} else {
-					fmt.Printf("[SERVER] Successfully updated: %s\n", remoteFile.Path)
+				fmt.Printf("[SERVER] Remote file is newer, queuing download: %s\n", remoteFile.Path)
+				select {
+				case s.downloadQueue <- downloadTask{peerName: peerName, filePath: remoteFile.Path}:
 					filesToDownload++
+				default:
+					fmt.Printf("[SERVER] WARNING: Download queue full, skipping %s\n", remoteFile.Path)
 				}
 			}
 		}
@@ -402,7 +442,7 @@ func (s *Server) checkAndDownloadMissingFiles(peerName string, remoteFiles []p2p
 	if filesToDownload == 0 {
 		fmt.Printf("[SERVER] No files to download from peer %s\n", peerName)
 	} else {
-		fmt.Printf("[SERVER] Downloaded %d files from peer %s\n", filesToDownload, peerName)
+		fmt.Printf("[SERVER] Queued %d files for download from peer %s\n", filesToDownload, peerName)
 	}
 
 	return nil

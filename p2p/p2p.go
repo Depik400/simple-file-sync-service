@@ -37,10 +37,20 @@ type P2PNetwork struct {
 }
 
 func NewP2PNetwork(cfg *config.Config) *P2PNetwork {
+	// Create optimized HTTP transport for better performance
+	transport := &http.Transport{
+		MaxIdleConns:        100,              // Keep up to 100 idle connections
+		MaxIdleConnsPerHost: 10,               // Up to 10 idle connections per host
+		IdleConnTimeout:     90 * time.Second, // Keep connections alive for 90 seconds
+		DisableCompression:  false,            // Enable compression
+		ForceAttemptHTTP2:   true,             // Try HTTP/2 when available
+	}
+
 	return &P2PNetwork{
 		config: cfg,
 		httpClient: &http.Client{
-			Timeout: 24 * time.Hour, // Allow long transfers for large files
+			Timeout:   24 * time.Hour, // Allow long transfers for large files
+			Transport: transport,
 		},
 		peers: make(map[string]*config.PeerConfig),
 	}
@@ -152,6 +162,64 @@ func (p *P2PNetwork) BroadcastDeletions(deletedFiles []FileInfo) error {
 func (p *P2PNetwork) RequestFile(serverName, filePath string) (io.ReadCloser, error) {
 	reader, _, err := p.RequestFileWithOffset(serverName, filePath, 0)
 	return reader, err
+}
+
+func (p *P2PNetwork) RequestFileRange(serverName, filePath string, start, end int64) (io.ReadCloser, int64, error) {
+	if p.demoMode {
+		return nil, 0, fmt.Errorf("file requests not supported in demo mode")
+	}
+
+	peer, exists := p.peers[serverName]
+	if !exists {
+		return nil, 0, fmt.Errorf("peer %s not found", serverName)
+	}
+
+	url := fmt.Sprintf("http://%s/files/%s", peer.GetAddr(), filePath)
+	fmt.Printf("[P2P] Requesting file range %s from peer %s (%d-%d)\n", filePath, serverName, start, end)
+
+	// Create request with Range header for specific byte range
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+
+	startTime := time.Now()
+	resp, err := p.httpClient.Do(req)
+	duration := time.Since(startTime)
+
+	if err != nil {
+		fmt.Printf("[P2P] ERROR: Failed to request file range %s from %s: %v (took %v)\n",
+			filePath, serverName, err, duration)
+		return nil, 0, fmt.Errorf("failed to request file range: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusPartialContent {
+		resp.Body.Close()
+		fmt.Printf("[P2P] ERROR: Server %s returned status %d for range request %s (took %v)\n",
+			serverName, resp.StatusCode, filePath, duration)
+		return nil, 0, fmt.Errorf("server returned status: %d", resp.StatusCode)
+	}
+
+	// Get total file size from Content-Range header
+	var fileSize int64
+	contentRange := resp.Header.Get("Content-Range")
+	if contentRange != "" {
+		parts := strings.Split(contentRange, "/")
+		if len(parts) == 2 {
+			if size, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+				fileSize = size
+			}
+		}
+	}
+
+	// Calculate expected range size
+	expectedSize := end - start + 1
+	fmt.Printf("[P2P] Successfully requested file range %s from %s (%d-%d, expected size: %d, took %v)\n",
+		filePath, serverName, start, end, expectedSize, duration)
+
+	return resp.Body, fileSize, nil
 }
 
 func (p *P2PNetwork) RequestFileWithOffset(serverName, filePath string, offset int64) (io.ReadCloser, int64, error) {
