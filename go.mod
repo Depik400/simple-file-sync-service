@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	github.com/gorilla/mux v1.8.0
-feat	github.com/rivo/tview v0.0.0-20241103174730-c76f7879f592
+	github.com/rivo/tview v0.0.0-20241103174730-c76f7879f592
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.44.1
 )
