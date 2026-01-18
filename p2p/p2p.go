@@ -13,6 +13,7 @@ import (
 
 	"file-sync/config"
 	"file-sync/logger"
+	"file-sync/ui"
 )
 
 type FileInfo struct {
@@ -35,6 +36,7 @@ type P2PNetwork struct {
 	mu         sync.RWMutex
 	peers      map[string]*config.PeerConfig
 	demoMode   bool
+	uiManager  *ui.UIManager
 }
 
 func NewP2PNetwork(cfg *config.Config) *P2PNetwork {
@@ -93,6 +95,16 @@ func (p *P2PNetwork) checkPeerHealth() {
 		go func(name string, peer *config.PeerConfig) {
 			if p.demoMode {
 				logger.Debug("DEMO: Would check health of peer %s at %s", name, peer.GetAddr())
+				// In demo mode, show servers as online
+				if p.uiManager != nil {
+					p.uiManager.UpdateServerStatus(name, ui.ServerStatus{
+						Name:     name,
+						Host:     peer.Host,
+						Port:     peer.Port,
+						Status:   "online",
+						LastSeen: time.Now(),
+					})
+				}
 				return
 			}
 
@@ -101,16 +113,28 @@ func (p *P2PNetwork) checkPeerHealth() {
 			resp, err := p.httpClient.Get(url)
 			duration := time.Since(start)
 
+			status := "offline"
 			if err != nil {
 				logger.Warn("Peer %s health check FAILED (%v) - took %v", name, err, duration)
-				return
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode == http.StatusOK {
-				logger.Debug("Peer %s health check OK - took %v", name, duration)
 			} else {
-				logger.Warn("Peer %s health check returned status %d - took %v", name, resp.StatusCode, duration)
+				defer resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					logger.Debug("Peer %s health check OK - took %v", name, duration)
+					status = "online"
+				} else {
+					logger.Warn("Peer %s health check returned status %d - took %v", name, resp.StatusCode, duration)
+				}
+			}
+
+			// Update UI with server status
+			if p.uiManager != nil {
+				p.uiManager.UpdateServerStatus(name, ui.ServerStatus{
+					Name:     name,
+					Host:     peer.Host,
+					Port:     peer.Port,
+					Status:   status,
+					LastSeen: time.Now(),
+				})
 			}
 		}(name, peer)
 	}
@@ -427,6 +451,10 @@ func (p *P2PNetwork) GetPeers() map[string]*config.PeerConfig {
 func (p *P2PNetwork) SetDemoMode(demo bool) {
 	p.demoMode = demo
 	logger.Info("Demo mode set to: %v", demo)
+}
+
+func (p *P2PNetwork) SetUIManager(uiManager *ui.UIManager) {
+	p.uiManager = uiManager
 }
 
 func (p *P2PNetwork) SendMessageToPeer(peerName string, message SyncMessage) error {

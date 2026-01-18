@@ -102,6 +102,11 @@ func main() {
 	// Initialize web server
 	webServer := server.NewServer(cfg, database, p2pNetwork, syncService)
 
+	// Set UI manager for P2P network (for server status updates)
+	if uiMode {
+		p2pNetwork.SetUIManager(uiManager)
+	}
+
 	// Handle graceful shutdown
 	go func() {
 		c := make(chan os.Signal, 1)

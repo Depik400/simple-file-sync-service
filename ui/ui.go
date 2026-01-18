@@ -69,7 +69,7 @@ func (ui *UIManager) Start() error {
 	// Header
 	header := tview.NewTextView().
 		SetTextAlign(tview.AlignCenter).
-		SetText("File Sync Monitor - Press 'q' or 'Esc' to quit, 'r' to refresh")
+		SetText("File Sync Monitor - Press 'q' or 'Esc' to quit")
 	header.SetBorder(true).SetTitle("File Sync v1.0")
 
 	// Downloads table
@@ -127,12 +127,6 @@ func (ui *UIManager) Start() error {
 			ui.app.Stop()
 			return nil
 		}
-		if event.Rune() == 'r' {
-			ui.app.QueueUpdateDraw(func() {
-				ui.updateDisplay()
-			})
-			return nil
-		}
 		return event
 	})
 
@@ -147,7 +141,7 @@ func (ui *UIManager) Start() error {
 
 // updateLoop periodically updates the display
 func (ui *UIManager) updateLoop() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
