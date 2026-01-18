@@ -195,6 +195,9 @@ func (p *P2PNetwork) RequestFileRange(serverName, filePath string, start, end in
 		return nil, 0, fmt.Errorf("failed to request file range: %w", err)
 	}
 
+	fmt.Printf("[P2P] Range request response: status=%d, content-length=%d\n",
+		resp.StatusCode, resp.ContentLength)
+
 	if resp.StatusCode != http.StatusPartialContent {
 		resp.Body.Close()
 		fmt.Printf("[P2P] ERROR: Server %s returned status %d for range request %s (took %v)\n",

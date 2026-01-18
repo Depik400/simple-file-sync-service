@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"file-sync/config"
@@ -354,14 +355,98 @@ func (s *Server) handleServeFile(w http.ResponseWriter, r *http.Request) {
 	localPath := filepath.Join(s.config.Server.SyncDir, filePath)
 	fmt.Printf("[SERVER] Serving file: %s (local path: %s, sync_dir: %s)\n", filePath, localPath, s.config.Server.SyncDir)
 
-	// Check if file exists
-	if _, err := os.Stat(localPath); os.IsNotExist(err) {
+	// Check if file exists and get file info
+	info, err := os.Stat(localPath)
+	if os.IsNotExist(err) {
 		fmt.Printf("[SERVER] ERROR: File not found: %s (sync_dir: %s, filePath: %s)\n", localPath, s.config.Server.SyncDir, filePath)
 		http.NotFound(w, r)
 		return
+	} else if err != nil {
+		fmt.Printf("[SERVER] ERROR: Failed to stat file %s: %v\n", localPath, err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
 	}
 
-	fmt.Printf("[SERVER] File exists, serving: %s\n", localPath)
+	fmt.Printf("[SERVER] File exists (%d bytes), checking range request\n", info.Size())
+
+	// Check for Range header
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		fmt.Printf("[SERVER] Range request: %s\n", rangeHeader)
+
+		// Parse range header (e.g., "bytes=100-199")
+		if strings.HasPrefix(rangeHeader, "bytes=") {
+			rangeSpec := strings.TrimPrefix(rangeHeader, "bytes=")
+			parts := strings.Split(rangeSpec, "-")
+			if len(parts) == 2 {
+				startStr, endStr := parts[0], parts[1]
+
+				var start, end int64
+				if startStr != "" {
+					start, err = strconv.ParseInt(startStr, 10, 64)
+					if err != nil {
+						fmt.Printf("[SERVER] ERROR: Invalid range start: %s\n", startStr)
+						http.Error(w, "Bad Request", http.StatusBadRequest)
+						return
+					}
+				}
+
+				if endStr != "" {
+					end, err = strconv.ParseInt(endStr, 10, 64)
+					if err != nil {
+						fmt.Printf("[SERVER] ERROR: Invalid range end: %s\n", endStr)
+						http.Error(w, "Bad Request", http.StatusBadRequest)
+						return
+					}
+				} else {
+					end = info.Size() - 1
+				}
+
+				// Validate range
+				if start < 0 || end >= info.Size() || start > end {
+					fmt.Printf("[SERVER] ERROR: Invalid range: %d-%d (file size: %d)\n", start, end, info.Size())
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", info.Size()))
+					http.Error(w, "Requested Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+					return
+				}
+
+				// Open file and seek to start position
+				file, err := os.Open(localPath)
+				if err != nil {
+					fmt.Printf("[SERVER] ERROR: Failed to open file: %v\n", err)
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					return
+				}
+				defer file.Close()
+
+				// Seek to start position
+				if _, err := file.Seek(start, 0); err != nil {
+					fmt.Printf("[SERVER] ERROR: Failed to seek file: %v\n", err)
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					return
+				}
+
+				// Set response headers
+				contentLength := end - start + 1
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, info.Size()))
+				w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+				w.WriteHeader(http.StatusPartialContent)
+
+				fmt.Printf("[SERVER] Serving range %d-%d (%d bytes)\n", start, end, contentLength)
+
+				// Copy the requested range
+				_, err = io.CopyN(w, file, contentLength)
+				if err != nil {
+					fmt.Printf("[SERVER] ERROR: Failed to copy range: %v\n", err)
+				} else {
+					fmt.Printf("[SERVER] Range served successfully\n")
+				}
+				return
+			}
+		}
+	}
+
+	// No range request or invalid range, serve entire file
+	fmt.Printf("[SERVER] Serving entire file: %s\n", localPath)
 	http.ServeFile(w, r, localPath)
 }
 
