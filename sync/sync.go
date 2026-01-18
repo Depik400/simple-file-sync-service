@@ -554,7 +554,7 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 			progress := float64(totalDownloaded) / float64(fileSize) * 100
 			elapsed := time.Since(downloadStartTime)
 			speed := int64(0)
-			if elapsed.Seconds() > 0 {
+			if elapsed.Seconds() >= 0.1 { // Minimum 100ms to avoid division by very small numbers
 				speed = int64(float64(totalDownloaded) / elapsed.Seconds())
 			}
 
@@ -762,6 +762,7 @@ func (fs *FileSync) DownloadFile(serverName, filePath string) error {
 func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 	localPath := filepath.Join(fs.config.Server.SyncDir, filePath)
 	tempPath := localPath + ".tmp"
+	downloadStartTime := time.Now()
 
 	// Check if another process is already downloading this file
 	if _, err := os.Stat(tempPath); err == nil {
@@ -842,11 +843,33 @@ func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 			}
 			totalDownloaded += int64(n)
 
-			// Progress logging (every 10MB)
-			if totalDownloaded%int64(10*1024*1024) == 0 {
+			// Update UI with progress and speed (every 1MB or every second)
+			elapsed := time.Since(downloadStartTime)
+			if totalDownloaded%int64(1024*1024) == 0 || elapsed.Seconds() >= 1 {
 				progress := float64(totalDownloaded) / float64(fileSize) * 100
-				logger.Info("Download progress: %.1f%% (%d/%d bytes)",
-					progress, totalDownloaded, fileSize)
+				speed := int64(0)
+				if elapsed.Seconds() >= 0.1 {
+					speed = int64(float64(totalDownloaded) / elapsed.Seconds())
+				}
+
+				if fs.uiManager != nil {
+					fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.TransferStatus{
+						FilePath:   filePath,
+						ServerName: serverName,
+						Status:     "active",
+						Progress:   progress,
+						Speed:      speed,
+						TotalBytes: fileSize,
+						Downloaded: totalDownloaded,
+						StartTime:  downloadStartTime,
+					})
+				}
+
+				// Progress logging (every 10MB)
+				if totalDownloaded%int64(10*1024*1024) == 0 {
+					logger.Info("Download progress: %.1f%% (%d/%d bytes)",
+						progress, totalDownloaded, fileSize)
+				}
 			}
 		}
 

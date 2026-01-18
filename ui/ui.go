@@ -442,10 +442,23 @@ func (ui *UIManager) formatSpeed(speed int64) string {
 		unitIndex++
 	}
 
+	// For small speeds, show more precision
 	if unitIndex == 0 {
+		if speedFloat < 1 {
+			return fmt.Sprintf("%.2f %s", speedFloat, units[unitIndex])
+		} else if speedFloat < 10 {
+			return fmt.Sprintf("%.1f %s", speedFloat, units[unitIndex])
+		}
 		return fmt.Sprintf("%.0f %s", speedFloat, units[unitIndex])
 	}
-	return fmt.Sprintf("%.1f %s", speedFloat, units[unitIndex])
+
+	// For larger units, show appropriate precision
+	if speedFloat < 10 {
+		return fmt.Sprintf("%.2f %s", speedFloat, units[unitIndex])
+	} else if speedFloat < 100 {
+		return fmt.Sprintf("%.1f %s", speedFloat, units[unitIndex])
+	}
+	return fmt.Sprintf("%.0f %s", speedFloat, units[unitIndex])
 }
 
 // formatSize formats file size
