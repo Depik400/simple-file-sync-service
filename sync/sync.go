@@ -317,10 +317,10 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer file.Close()
 
 	// Pre-allocate file space
 	if err := file.Truncate(fileSize); err != nil {
+		file.Close()
 		return fmt.Errorf("failed to pre-allocate file: %w", err)
 	}
 
@@ -332,6 +332,7 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 	}
 
 	results := make(chan chunkResult, len(ranges))
+	errorOccurred := make(chan struct{}) // Signal channel for errors
 
 	// Semaphore to limit concurrent downloads
 	sem := make(chan struct{}, maxConcurrency)
@@ -343,6 +344,15 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 		go func(cr chunkRange) {
 			defer wg.Done()
 
+			// Check if an error already occurred in another worker
+			select {
+			case <-errorOccurred:
+				// Another worker failed, abort this one too
+				results <- chunkResult{range_: cr, err: fmt.Errorf("aborted due to error in another worker")}
+				return
+			default:
+			}
+
 			// Acquire semaphore
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -352,6 +362,10 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 
 			reader, _, err := fs.p2p.RequestFileRange(serverName, filePath, cr.start, cr.end)
 			if err != nil {
+				select {
+				case errorOccurred <- struct{}{}: // Signal error to other workers
+				default:
+				}
 				results <- chunkResult{range_: cr, err: err}
 				return
 			}
@@ -374,12 +388,20 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 					if err == io.EOF {
 						break
 					}
+					select {
+					case errorOccurred <- struct{}{}: // Signal error to other workers
+					default:
+					}
 					results <- chunkResult{range_: cr, err: err}
 					return
 				}
 			}
 
 			if totalRead != expectedSize {
+				select {
+				case errorOccurred <- struct{}{}: // Signal error to other workers
+				default:
+				}
 				results <- chunkResult{range_: cr, err: fmt.Errorf("read size mismatch: expected %d, got %d", expectedSize, totalRead)}
 				return
 			}
@@ -396,23 +418,80 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 
 	// Collect and write results
 	totalDownloaded := int64(0)
+	chunksReceived := 0
+	hasError := false
+
 	for result := range results {
+		chunksReceived++
+
+		// Check for errors in chunks
 		if result.err != nil {
-			return fmt.Errorf("failed to download chunk %d-%d: %w", result.range_.start, result.range_.end, result.err)
+			if !hasError {
+				hasError = true
+				file.Close()
+				os.Remove(tempPath) // Clean up temp file on error
+			}
+			continue // Continue to drain the channel
+		}
+
+		// Skip writing if we already had an error
+		if hasError {
+			continue
 		}
 
 		// Write chunk to file
 		if _, err := file.WriteAt(result.data, result.range_.start); err != nil {
+			hasError = true
+			file.Close()
+			os.Remove(tempPath) // Clean up temp file on error
 			return fmt.Errorf("failed to write chunk at offset %d: %w", result.range_.start, err)
 		}
 
 		totalDownloaded += int64(len(result.data))
-		fmt.Printf("[SYNC] Chunk %d-%d written (%d/%d bytes total)\n",
-			result.range_.start, result.range_.end, totalDownloaded, fileSize)
+		fmt.Printf("[SYNC] Chunk %d-%d written (%d/%d bytes total, %d/%d chunks)\n",
+			result.range_.start, result.range_.end, totalDownloaded, fileSize, chunksReceived, len(ranges))
+
+		// If we received all chunks, we can break early
+		if chunksReceived == len(ranges) {
+			break
+		}
 	}
 
-	// Close and rename temp file
+	// If there was an error, return it
+	if hasError {
+		return fmt.Errorf("download failed due to chunk errors")
+	}
+
+	// Sync file to disk before closing
+	if err := file.Sync(); err != nil {
+		file.Close()
+		os.Remove(tempPath) // Clean up temp file on error
+		return fmt.Errorf("failed to sync file to disk: %w", err)
+	}
+
+	// Close file
 	file.Close()
+
+	// Verify that we received all chunks
+	if chunksReceived != len(ranges) {
+		os.Remove(tempPath) // Clean up temp file on error
+		return fmt.Errorf("missing chunks: expected %d, received %d", len(ranges), chunksReceived)
+	}
+
+	// Verify that we downloaded all expected data
+	if totalDownloaded != fileSize {
+		os.Remove(tempPath) // Clean up temp file on error
+		return fmt.Errorf("download incomplete: expected %d bytes, got %d bytes", fileSize, totalDownloaded)
+	}
+
+	// Final verification - check file size on disk
+	if info, err := os.Stat(tempPath); err != nil {
+		os.Remove(tempPath) // Clean up temp file on error
+		return fmt.Errorf("failed to verify temp file: %w", err)
+	} else if info.Size() != fileSize {
+		os.Remove(tempPath) // Clean up temp file on error
+		return fmt.Errorf("file size mismatch on disk: expected %d, got %d", fileSize, info.Size())
+	}
 
 	if err := os.Rename(tempPath, localPath); err != nil {
 		return fmt.Errorf("failed to rename temp file: %w", err)
@@ -495,7 +574,12 @@ func (fs *FileSync) DownloadFile(serverName, filePath string) error {
 
 	if fileSize >= minParallelSize && maxConcurrency > 1 {
 		fmt.Printf("[SYNC] Using parallel download for large file (%d bytes)\n", fileSize)
-		return fs.downloadFileWithConcurrency(serverName, filePath, maxConcurrency)
+		err := fs.downloadFileWithConcurrency(serverName, filePath, maxConcurrency)
+		if err != nil {
+			fmt.Printf("[SYNC] Parallel download failed, falling back to sequential: %v\n", err)
+			return fs.downloadFileSequential(serverName, filePath)
+		}
+		return nil
 	} else {
 		fmt.Printf("[SYNC] Using sequential download for file (%d bytes)\n", fileSize)
 		return fs.downloadFileSequential(serverName, filePath)
