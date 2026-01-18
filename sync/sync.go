@@ -43,6 +43,11 @@ func (fs *FileSync) Start() error {
 		return fmt.Errorf("failed to create sync directory: %w", err)
 	}
 
+	// Clean up orphaned temp files from previous failed downloads
+	if err := fs.cleanupOrphanedTempFiles(); err != nil {
+		fmt.Printf("[SYNC] WARNING: Failed to cleanup temp files: %v\n", err)
+	}
+
 	// Start periodic sync
 	go fs.syncRoutine()
 
@@ -200,6 +205,45 @@ func (fs *FileSync) GetP2PNetwork() *p2p.P2PNetwork {
 	return fs.p2p
 }
 
+func (fs *FileSync) cleanupOrphanedTempFiles() error {
+	fmt.Printf("[SYNC] Cleaning up orphaned temp files...\n")
+
+	return filepath.Walk(fs.config.Server.SyncDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		fileName := filepath.Base(path)
+		if strings.HasSuffix(fileName, ".tmp") {
+			// Check if corresponding final file exists
+			finalPath := strings.TrimSuffix(path, ".tmp")
+			if _, err := os.Stat(finalPath); os.IsNotExist(err) {
+				// Final file doesn't exist, this is an orphaned temp file
+				fmt.Printf("[SYNC] Removing orphaned temp file: %s\n", path)
+				if err := os.Remove(path); err != nil {
+					fmt.Printf("[SYNC] WARNING: Failed to remove orphaned temp file %s: %v\n", path, err)
+				}
+			} else {
+				// Final file exists, check if temp file is newer (indicates failed rename)
+				if finalInfo, err := os.Stat(finalPath); err == nil {
+					if info.ModTime().After(finalInfo.ModTime()) {
+						fmt.Printf("[SYNC] Removing stale temp file (newer than final): %s\n", path)
+						if err := os.Remove(path); err != nil {
+							fmt.Printf("[SYNC] WARNING: Failed to remove stale temp file %s: %v\n", path, err)
+						}
+					}
+				}
+			}
+		}
+
+		return nil
+	})
+}
+
 func (fs *FileSync) shouldSkipFile(fileName string) bool {
 	// Skip PID files
 	if strings.HasSuffix(fileName, ".pid") {
@@ -211,8 +255,9 @@ func (fs *FileSync) shouldSkipFile(fileName string) bool {
 		return true
 	}
 
-	// Skip temporary files
+	// Skip temporary files (including .tmp files from downloads)
 	if strings.HasSuffix(fileName, ".tmp") || strings.HasSuffix(fileName, ".temp") {
+		fmt.Printf("[SYNC] Skipping temporary file: %s\n", fileName)
 		return true
 	}
 
@@ -311,8 +356,14 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 
 	fmt.Printf("[SYNC] File divided into %d chunks\n", len(ranges))
 
-	// Create temporary file
+	// Create temporary file (atomic creation)
 	tempPath := localPath + ".tmp"
+
+	// Check if temp file already exists (another process might be downloading)
+	if _, err := os.Stat(tempPath); err == nil {
+		return fmt.Errorf("temp file already exists, another process is downloading this file")
+	}
+
 	file, err := os.Create(tempPath)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
@@ -599,6 +650,24 @@ func (fs *FileSync) calculateAdaptiveChunkSize(fileSize int64, maxConcurrency in
 }
 
 func (fs *FileSync) DownloadFile(serverName, filePath string) error {
+	localPath := filepath.Join(fs.config.Server.SyncDir, filePath)
+	tempPath := localPath + ".tmp"
+
+	// Check if another process is already downloading this file
+	if _, err := os.Stat(tempPath); err == nil {
+		fmt.Printf("[SYNC] File %s is already being downloaded by another process, skipping\n", filePath)
+		return nil // Skip download, another process is handling it
+	}
+
+	// Small delay to allow other servers to see the file if it's being downloaded
+	time.Sleep(100 * time.Millisecond)
+
+	// Check if file already exists and is complete
+	if info, err := os.Stat(localPath); err == nil {
+		fmt.Printf("[SYNC] File %s already exists (%d bytes), skipping download\n", filePath, info.Size())
+		return nil
+	}
+
 	// First, get file size to decide download strategy
 	reader, fileSize, err := fs.p2p.RequestFileWithOffset(serverName, filePath, 0)
 	if err != nil {
@@ -611,32 +680,51 @@ func (fs *FileSync) DownloadFile(serverName, filePath string) error {
 	maxConcurrency := fs.config.Sync.MaxParallelChunks
 
 	if fileSize >= minParallelSize && maxConcurrency > 1 {
-		fmt.Printf("[SYNC] Using parallel download for large file (%d bytes)\n", fileSize)
+		fmt.Printf("[SYNC] Using parallel download for large file %s (%d bytes)\n", filePath, fileSize)
 		err := fs.downloadFileWithConcurrency(serverName, filePath, maxConcurrency)
 		if err != nil {
-			fmt.Printf("[SYNC] Parallel download failed, falling back to sequential: %v\n", err)
+			fmt.Printf("[SYNC] Parallel download failed for %s, falling back to sequential: %v\n", filePath, err)
 			return fs.downloadFileSequential(serverName, filePath)
 		}
 		return nil
 	} else {
-		fmt.Printf("[SYNC] Using sequential download for file (%d bytes)\n", fileSize)
+		fmt.Printf("[SYNC] Using sequential download for file %s (%d bytes)\n", filePath, fileSize)
 		return fs.downloadFileSequential(serverName, filePath)
 	}
 }
 
 func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 	localPath := filepath.Join(fs.config.Server.SyncDir, filePath)
+	tempPath := localPath + ".tmp"
+
+	// Check if another process is already downloading this file
+	if _, err := os.Stat(tempPath); err == nil {
+		fmt.Printf("[SYNC] Sequential download: File %s is already being downloaded by another process, skipping\n", filePath)
+		return nil // Skip download, another process is handling it
+	}
+
+	// Check if file already exists and is complete
+	if info, err := os.Stat(localPath); err == nil {
+		fmt.Printf("[SYNC] Sequential download: File %s already exists (%d bytes), skipping\n", filePath, info.Size())
+		return nil
+	}
 
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return err
 	}
 
-	// Check if file already exists and get its size for resume
+	// Check if temp file exists for resume
 	var existingSize int64 = 0
-	if info, err := os.Stat(localPath); err == nil {
+	if info, err := os.Stat(tempPath); err == nil {
 		existingSize = info.Size()
-		fmt.Printf("[SYNC] Resuming download from offset: %d bytes\n", existingSize)
+		fmt.Printf("[SYNC] Sequential download: Resuming from temp file, offset: %d bytes\n", existingSize)
+		// Rename temp file to continue download
+		if err := os.Rename(tempPath, localPath); err != nil {
+			return fmt.Errorf("failed to resume from temp file: %w", err)
+		}
+	} else {
+		fmt.Printf("[SYNC] Sequential download: Starting fresh download\n")
 	}
 
 	// Request file with offset support
@@ -646,17 +734,22 @@ func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 	}
 	defer reader.Close()
 
-	// Open file for writing (append if resuming)
-	var file *os.File
-	if existingSize > 0 {
-		file, err = os.OpenFile(localPath, os.O_APPEND|os.O_WRONLY, 0644)
-	} else {
-		file, err = os.Create(localPath)
-	}
+	// Create temp file for download
+	file, err := os.Create(tempPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer file.Close()
+
+	// If resuming, seek to the end
+	if existingSize > 0 {
+		if _, err := file.Seek(existingSize, 0); err != nil {
+			file.Close()
+			os.Remove(tempPath)
+			return fmt.Errorf("failed to seek in temp file: %w", err)
+		}
+		fmt.Printf("[SYNC] Sequential download: Resumed at offset %d bytes\n", existingSize)
+	}
 
 	// Copy data with optimized buffering
 	chunkSize := int64(fs.config.Sync.ChunkSize)
@@ -706,10 +799,35 @@ func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 
 	fmt.Printf("[SYNC] Sequential download completed: %s (%d bytes)\n", filePath, totalDownloaded)
 
+	// Sync file to disk
+	if err := file.Sync(); err != nil {
+		file.Close()
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to sync file to disk: %w", err)
+	}
+
+	// Close file
+	file.Close()
+
 	// Verify file size
 	if fileSize > 0 && totalDownloaded != fileSize {
+		os.Remove(tempPath)
 		fmt.Printf("[SYNC] ERROR: Sequential download size mismatch: expected %d, got %d\n", fileSize, totalDownloaded)
 		return fmt.Errorf("file size mismatch: expected %d, got %d", fileSize, totalDownloaded)
+	}
+
+	// Verify file size on disk
+	if info, err := os.Stat(tempPath); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to verify temp file: %w", err)
+	} else if info.Size() != fileSize {
+		os.Remove(tempPath)
+		return fmt.Errorf("file size mismatch on disk: expected %d, got %d", fileSize, info.Size())
+	}
+
+	// Rename temp file to final file
+	if err := os.Rename(tempPath, localPath); err != nil {
+		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
 	fmt.Printf("[SYNC] Sequential download verification passed, calculating hash...\n")
