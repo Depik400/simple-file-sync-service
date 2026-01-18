@@ -324,6 +324,7 @@ func (fs *FileSync) DownloadFileParallel(serverName, filePath string) error {
 
 func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, maxConcurrency int) error {
 	localPath := filepath.Join(fs.config.Server.SyncDir, filePath)
+	downloadStartTime := time.Now()
 
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
@@ -348,10 +349,10 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 
 	// Update UI with download start
 	if fs.uiManager != nil {
-		fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.DownloadStatus{
+		fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.TransferStatus{
 			FilePath:   filePath,
 			ServerName: serverName,
-			Status:     "downloading",
+			Status:     "active",
 			Progress:   0,
 			TotalBytes: fileSize,
 			StartTime:  time.Now(),
@@ -551,15 +552,21 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 		// Update UI with progress
 		if fs.uiManager != nil {
 			progress := float64(totalDownloaded) / float64(fileSize) * 100
-			fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.DownloadStatus{
+			elapsed := time.Since(downloadStartTime)
+			speed := int64(0)
+			if elapsed.Seconds() > 0 {
+				speed = int64(float64(totalDownloaded) / elapsed.Seconds())
+			}
+
+			fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.TransferStatus{
 				FilePath:   filePath,
 				ServerName: serverName,
-				Status:     "downloading",
+				Status:     "active",
 				Progress:   progress,
-				Speed:      0, // TODO: calculate actual speed
+				Speed:      speed,
 				TotalBytes: fileSize,
 				Downloaded: totalDownloaded,
-				StartTime:  time.Now(), // TODO: track actual start time
+				StartTime:  downloadStartTime,
 			})
 		}
 	}
@@ -573,7 +580,7 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 
 		// Update UI with error
 		if fs.uiManager != nil {
-			fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.DownloadStatus{
+			fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.TransferStatus{
 				FilePath:   filePath,
 				ServerName: serverName,
 				Status:     "failed",
@@ -637,7 +644,7 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 
 	// Update UI with completion
 	if fs.uiManager != nil {
-		fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.DownloadStatus{
+		fs.uiManager.UpdateDownloadStatus(filePath, serverName, ui.TransferStatus{
 			FilePath:   filePath,
 			ServerName: serverName,
 			Status:     "completed",
@@ -1010,6 +1017,19 @@ func (fs *FileSync) requestFileListFromPeer(peerName string) error {
 	}
 
 	return fs.p2p.SendSyncMessage(peerName, syncMsg)
+}
+
+func (fs *FileSync) NotifyUpload(filePath, serverName string, fileSize int64) {
+	if fs.uiManager != nil {
+		fs.uiManager.UpdateUploadStatus(filePath, serverName, ui.TransferStatus{
+			FilePath:   filePath,
+			ServerName: serverName,
+			Status:     "completed",
+			Progress:   100,
+			TotalBytes: fileSize,
+			Downloaded: fileSize,
+		})
+	}
 }
 
 func (fs *FileSync) RequestSyncFromPeer(peerName string) error {

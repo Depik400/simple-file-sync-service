@@ -470,10 +470,14 @@ func (s *Server) handleReceiveFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	if _, err := io.Copy(file, r.Body); err != nil {
+	fileSize, err := io.Copy(file, r.Body)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Notify UI about successful upload
+	s.sync.NotifyUpload(filePath, "local", fileSize)
 
 	w.WriteHeader(http.StatusOK)
 }

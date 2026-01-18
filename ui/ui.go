@@ -12,11 +12,12 @@ import (
 	"github.com/rivo/tview"
 )
 
-// DownloadStatus represents the status of a file download
-type DownloadStatus struct {
+// TransferStatus represents the status of a file transfer (download or upload)
+type TransferStatus struct {
 	FilePath   string
 	ServerName string
-	Status     string  // "downloading", "completed", "failed", "paused"
+	Type       string  // "download", "upload"
+	Status     string  // "active", "completed", "failed", "paused"
 	Progress   float64 // 0.0 to 100.0
 	Speed      int64   // bytes per second
 	TotalBytes int64
@@ -39,23 +40,25 @@ type ServerStatus struct {
 
 // UIManager manages the terminal UI
 type UIManager struct {
-	app            *tview.Application
-	downloadsTable *tview.Table
-	serversTable   *tview.Table
-	statusText     *tview.TextView
-	logsText       *tview.TextView
-	downloads      map[string]*DownloadStatus
-	servers        map[string]*ServerStatus
-	mutex          sync.RWMutex
-	stopChan       chan struct{} // Channel to signal stopping
+	app             *tview.Application
+	transfersTable  *tview.Table
+	serversTable    *tview.Table
+	statusText      *tview.TextView
+	logsText        *tview.TextView
+	transfers       map[string]*TransferStatus // Active transfers
+	transferHistory []*TransferStatus          // Completed transfers (last 50)
+	servers         map[string]*ServerStatus
+	mutex           sync.RWMutex
+	stopChan        chan struct{} // Channel to signal stopping
 }
 
 // NewUIManager creates a new UI manager
 func NewUIManager() *UIManager {
 	return &UIManager{
-		downloads: make(map[string]*DownloadStatus),
-		servers:   make(map[string]*ServerStatus),
-		stopChan:  make(chan struct{}),
+		transfers:       make(map[string]*TransferStatus),
+		transferHistory: make([]*TransferStatus, 0, 50),
+		servers:         make(map[string]*ServerStatus),
+		stopChan:        make(chan struct{}),
 	}
 }
 
@@ -69,14 +72,15 @@ func (ui *UIManager) Start() error {
 	// Header
 	header := tview.NewTextView().
 		SetTextAlign(tview.AlignCenter).
-		SetText("File Sync Monitor - Press 'q' or 'Esc' to quit")
+		SetText("File Sync Monitor - Press 'q' or 'Esc' to quit, use arrows to navigate")
 	header.SetBorder(true).SetTitle("File Sync v1.0")
 
-	// Downloads table
-	ui.downloadsTable = tview.NewTable().
+	// Transfers table (downloads and uploads)
+	ui.transfersTable = tview.NewTable().
 		SetBorders(true).
-		SetSelectable(true, false)
-	ui.downloadsTable.SetBorder(true).SetTitle("Active Downloads")
+		SetSelectable(true, false).
+		SetFixed(1, 0) // Fix header row
+	ui.transfersTable.SetBorder(true).SetTitle("File Transfers")
 
 	// Servers table
 	ui.serversTable = tview.NewTable().
@@ -99,7 +103,7 @@ func (ui *UIManager) Start() error {
 
 	// Layout
 	tablesFlex := tview.NewFlex().
-		AddItem(ui.downloadsTable, 0, 2, false).
+		AddItem(ui.transfersTable, 0, 2, false).
 		AddItem(ui.serversTable, 0, 1, false)
 
 	bottomFlex := tview.NewFlex().
@@ -162,19 +166,19 @@ func (ui *UIManager) updateDisplay() {
 	ui.mutex.RLock()
 	defer ui.mutex.RUnlock()
 
-	ui.updateDownloadsTable()
+	ui.updateTransfersTable()
 	ui.updateServersTable()
 	ui.updateStatusText()
 	ui.updateLogsText()
 }
 
-// updateDownloadsTable updates the downloads table
-func (ui *UIManager) updateDownloadsTable() {
-	table := ui.downloadsTable
+// updateTransfersTable updates the transfers table (active + history)
+func (ui *UIManager) updateTransfersTable() {
+	table := ui.transfersTable
 	table.Clear()
 
-	// Headers
-	headers := []string{"File", "Server", "Progress", "Speed", "Status", "ETA"}
+	// Headers - add Type column
+	headers := []string{"Type", "File", "Server", "Progress", "Speed", "Status", "Time"}
 	for i, header := range headers {
 		table.SetCell(0, i, tview.NewTableCell(header).
 			SetTextColor(tview.Styles.SecondaryTextColor).
@@ -182,53 +186,94 @@ func (ui *UIManager) updateDownloadsTable() {
 			SetExpansion(1))
 	}
 
-	// Data rows
+	// Data rows - first active transfers, then history
 	row := 1
-	for _, download := range ui.downloads {
-		// File name (truncated)
-		fileName := download.FilePath
-		if len(fileName) > 30 {
-			fileName = "..." + fileName[len(fileName)-27:]
-		}
 
-		// Progress bar
-		progressBar := ui.createProgressBar(download.Progress, 20)
-
-		// Speed
-		speedStr := ui.formatSpeed(download.Speed)
-
-		// ETA
-		etaStr := ui.calculateETA(download)
-
-		// Status with color
-		statusCell := tview.NewTableCell(download.Status)
-		switch download.Status {
-		case "downloading":
-			statusCell.SetTextColor(tview.Styles.PrimaryTextColor)
-		case "completed":
-			statusCell.SetTextColor(tview.Styles.SecondaryTextColor)
-		case "failed":
-			statusCell.SetTextColor(tview.Styles.TertiaryTextColor)
-		case "paused":
-			statusCell.SetTextColor(tview.Styles.ContrastSecondaryTextColor)
-		}
-
-		cells := []string{fileName, download.ServerName, progressBar, speedStr, download.Status, etaStr}
-		for col, cellText := range cells {
-			cell := tview.NewTableCell(cellText).SetExpansion(1)
-			if col == 4 { // Status column
-				cell = statusCell
-			}
-			table.SetCell(row, col, cell)
-		}
+	// Active transfers
+	for _, transfer := range ui.transfers {
+		ui.addTransferRow(table, transfer, row)
 		row++
 	}
 
-	// If no downloads, show message
+	// Recent completed transfers (last 10)
+	historyCount := 10
+	if len(ui.transferHistory) < historyCount {
+		historyCount = len(ui.transferHistory)
+	}
+
+	for i := len(ui.transferHistory) - historyCount; i < len(ui.transferHistory); i++ {
+		ui.addTransferRow(table, ui.transferHistory[i], row)
+		row++
+	}
+
+	// If no transfers, show message
 	if row == 1 {
-		table.SetCell(1, 0, tview.NewTableCell("No active downloads").
+		table.SetCell(1, 0, tview.NewTableCell("No file transfers").
 			SetTextColor(tview.Styles.SecondaryTextColor).
 			SetSelectable(false))
+	}
+}
+
+// addTransferRow adds a single transfer row to the table
+func (ui *UIManager) addTransferRow(table *tview.Table, transfer *TransferStatus, row int) {
+	// Type indicator
+	typeStr := transfer.Type
+	if transfer.Type == "download" {
+		typeStr = "↓"
+	} else if transfer.Type == "upload" {
+		typeStr = "↑"
+	}
+
+	// File name (truncated)
+	fileName := transfer.FilePath
+	if len(fileName) > 30 {
+		fileName = "..." + fileName[len(fileName)-27:]
+	}
+
+	// Progress bar or completion time
+	var progressStr string
+	if transfer.Status == "active" {
+		progressStr = ui.createProgressBar(transfer.Progress, 15)
+	} else {
+		// For completed transfers, show completion time
+		if !transfer.LastUpdate.IsZero() {
+			progressStr = ui.formatDuration(time.Since(transfer.LastUpdate)) + " ago"
+		} else {
+			progressStr = "Done"
+		}
+	}
+
+	// Speed
+	speedStr := ui.formatSpeed(transfer.Speed)
+
+	// Status with color
+	statusCell := tview.NewTableCell(transfer.Status)
+	switch transfer.Status {
+	case "active":
+		statusCell.SetTextColor(tview.Styles.PrimaryTextColor)
+	case "completed":
+		statusCell.SetTextColor(tview.Styles.SecondaryTextColor)
+	case "failed":
+		statusCell.SetTextColor(tview.Styles.TertiaryTextColor)
+	case "paused":
+		statusCell.SetTextColor(tview.Styles.ContrastSecondaryTextColor)
+	}
+
+	// Time
+	timeStr := ""
+	if transfer.Status == "active" && !transfer.StartTime.IsZero() {
+		timeStr = ui.formatDuration(time.Since(transfer.StartTime))
+	} else if !transfer.LastUpdate.IsZero() {
+		timeStr = ui.formatDuration(time.Since(transfer.LastUpdate)) + " ago"
+	}
+
+	cells := []string{typeStr, fileName, transfer.ServerName, progressStr, speedStr, transfer.Status, timeStr}
+	for col, cellText := range cells {
+		cell := tview.NewTableCell(cellText).SetExpansion(1)
+		if col == 5 { // Status column
+			cell = statusCell
+		}
+		table.SetCell(row, col, cell)
 	}
 }
 
@@ -296,10 +341,10 @@ func (ui *UIManager) updateStatusText() {
 	activeDownloads := 0
 	totalSpeed := int64(0)
 
-	for _, download := range ui.downloads {
-		if download.Status == "downloading" {
+	for _, transfer := range ui.transfers {
+		if transfer.Status == "active" {
 			activeDownloads++
-			totalSpeed += download.Speed
+			totalSpeed += transfer.Speed
 		}
 	}
 
@@ -433,17 +478,17 @@ func (ui *UIManager) formatDuration(d time.Duration) string {
 }
 
 // calculateETA calculates estimated time of arrival
-func (ui *UIManager) calculateETA(download *DownloadStatus) string {
-	if download.Status != "downloading" || download.Speed == 0 {
+func (ui *UIManager) calculateETA(transfer *TransferStatus) string {
+	if transfer.Status != "active" || transfer.Speed == 0 {
 		return "-"
 	}
 
-	remaining := download.TotalBytes - download.Downloaded
+	remaining := transfer.TotalBytes - transfer.Downloaded
 	if remaining <= 0 {
 		return "Done"
 	}
 
-	seconds := float64(remaining) / float64(download.Speed)
+	seconds := float64(remaining) / float64(transfer.Speed)
 	duration := time.Duration(seconds) * time.Second
 
 	if duration < time.Minute {
@@ -455,25 +500,48 @@ func (ui *UIManager) calculateETA(download *DownloadStatus) string {
 	}
 }
 
-// UpdateDownloadStatus updates the status of a download
-func (ui *UIManager) UpdateDownloadStatus(filePath, serverName string, status DownloadStatus) {
+// UpdateTransferStatus updates the status of a file transfer
+func (ui *UIManager) UpdateTransferStatus(filePath, serverName, transferType string, status TransferStatus) {
 	ui.mutex.Lock()
 	defer ui.mutex.Unlock()
 
 	key := filePath + ":" + serverName
+	status.Type = transferType
 	status.LastUpdate = time.Now()
 
+	// If status changed to completed or failed, move to history
 	if status.Status == "completed" || status.Status == "failed" {
-		// Remove completed/failed downloads after a delay
+		// Add to history
+		ui.transferHistory = append(ui.transferHistory, &status)
+
+		// Keep only last 50 entries
+		if len(ui.transferHistory) > 50 {
+			ui.transferHistory = ui.transferHistory[len(ui.transferHistory)-50:]
+		}
+
+		// Remove from active transfers after a short delay
 		go func() {
-			time.Sleep(5 * time.Second)
+			time.Sleep(2 * time.Second)
 			ui.mutex.Lock()
-			delete(ui.downloads, key)
+			delete(ui.transfers, key)
 			ui.mutex.Unlock()
 		}()
 	} else {
-		ui.downloads[key] = &status
+		// Update active transfer
+		ui.transfers[key] = &status
 	}
+}
+
+// UpdateDownloadStatus updates the status of a download (backward compatibility)
+func (ui *UIManager) UpdateDownloadStatus(filePath, serverName string, status TransferStatus) {
+	status.Type = "download"
+	ui.UpdateTransferStatus(filePath, serverName, "download", status)
+}
+
+// UpdateUploadStatus updates the status of an upload
+func (ui *UIManager) UpdateUploadStatus(filePath, serverName string, status TransferStatus) {
+	status.Type = "upload"
+	ui.UpdateTransferStatus(filePath, serverName, "upload", status)
 }
 
 // UpdateServerStatus updates the status of a server
@@ -485,13 +553,13 @@ func (ui *UIManager) UpdateServerStatus(serverName string, status ServerStatus) 
 	ui.servers[serverName] = &status
 }
 
-// RemoveDownload removes a download from tracking
+// RemoveDownload removes a download from tracking (backward compatibility)
 func (ui *UIManager) RemoveDownload(filePath, serverName string) {
 	ui.mutex.Lock()
 	defer ui.mutex.Unlock()
 
 	key := filePath + ":" + serverName
-	delete(ui.downloads, key)
+	delete(ui.transfers, key)
 }
 
 // Stop stops the UI
