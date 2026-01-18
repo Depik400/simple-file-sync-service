@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -10,6 +9,7 @@ import (
 
 	"file-sync/config"
 	"file-sync/db"
+	"file-sync/logger"
 	"file-sync/p2p"
 	"file-sync/server"
 	"file-sync/sync"
@@ -17,22 +17,18 @@ import (
 )
 
 func main() {
-	fmt.Printf("=== File Sync Server Starting ===\n")
+	logger.Info("=== File Sync Server Starting ===")
 
 	// Check for demo mode and UI mode
 	demoMode := false
 	uiMode := false
 	args := os.Args[1:]
-	for i, arg := range args {
+	for _, arg := range args {
 		switch arg {
 		case "--demo":
 			demoMode = true
-			// Remove --demo from args
-			args = append(args[:i], args[i+1:]...)
 		case "--ui":
 			uiMode = true
-			// Remove --ui from args
-			args = append(args[:i], args[i+1:]...)
 		}
 	}
 
@@ -42,29 +38,39 @@ func main() {
 		configPath = args[0]
 	}
 
-	fmt.Printf("[MAIN] Loading configuration from: %s\n", configPath)
+	logger.Info("Loading configuration from: %s", configPath)
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	fmt.Printf("[MAIN] Configuration loaded successfully\n")
-	fmt.Printf("[MAIN] Server Name: %s\n", cfg.Server.Name)
-	fmt.Printf("[MAIN] Server Address: %s\n", cfg.GetServerAddr())
-	fmt.Printf("[MAIN] Web Interface: %s\n", cfg.GetServerAddr())
-	fmt.Printf("[MAIN] Sync Directory: %s\n", cfg.Server.SyncDir)
-	fmt.Printf("[MAIN] Database: %s\n", cfg.Database.Path)
-	fmt.Printf("[MAIN] Peers: %d\n", len(cfg.Peers))
+	// Initialize logger
+	if err := logger.InitDefaultLogger(cfg.Logging.File, uiMode); err != nil {
+		log.Fatalf("Failed to initialize logger: %v", err)
+	}
+	defer logger.Close()
+
+	logger.Info("Configuration loaded successfully")
+	logger.Info("Server Name: %s", cfg.Server.Name)
+	logger.Info("Server Address: %s", cfg.GetServerAddr())
+	logger.Info("Web Interface: %s", cfg.GetServerAddr())
+	logger.Info("Sync Directory: %s", cfg.Server.SyncDir)
+	logger.Info("Database: %s", cfg.Database.Path)
+	logger.Info("Peers: %d", len(cfg.Peers))
 	if demoMode {
-		fmt.Printf("[MAIN] Running in DEMO mode (no network)\n")
+		logger.Info("Running in DEMO mode (no network)")
+	}
+	if uiMode {
+		logger.Info("Running in UI mode")
 	}
 
-	fmt.Printf("[MAIN] Starting File Sync Server: %s\n", cfg.Server.Name)
+	logger.Info("Starting File Sync Server: %s", cfg.Server.Name)
 
 	// Initialize database
 	database, err := db.NewDatabase(cfg.Database.Path)
 	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+		logger.Error("Failed to initialize database: %v", err)
+		os.Exit(1)
 	}
 	defer database.Close()
 
@@ -72,14 +78,15 @@ func main() {
 	p2pNetwork := p2p.NewP2PNetwork(cfg)
 	p2pNetwork.SetDemoMode(demoMode)
 	if err := p2pNetwork.Start(); err != nil {
-		log.Fatalf("Failed to start P2P network: %v", err)
+		logger.Error("Failed to start P2P network: %v", err)
+		os.Exit(1)
 	}
 
 	// Initialize UI manager
 	var uiManager *ui.UIManager
 	if uiMode {
 		uiManager = ui.NewUIManager()
-		fmt.Printf("[MAIN] UI mode enabled\n")
+		logger.Info("UI mode enabled")
 	}
 
 	// Initialize file sync service
@@ -88,7 +95,8 @@ func main() {
 		syncService.SetUIManager(uiManager)
 	}
 	if err := syncService.Start(); err != nil {
-		log.Fatalf("Failed to start sync service: %v", err)
+		logger.Error("Failed to start sync service: %v", err)
+		os.Exit(1)
 	}
 
 	// Initialize web server
@@ -99,7 +107,7 @@ func main() {
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 		<-c
-		fmt.Println("\nShutting down gracefully...")
+		logger.Info("Shutting down gracefully...")
 		if uiManager != nil {
 			uiManager.Stop()
 		}
@@ -109,14 +117,14 @@ func main() {
 
 	// Start appropriate mode
 	if uiMode {
-		fmt.Printf("[MAIN] Starting UI mode\n")
+		logger.Info("Starting UI mode")
 
 		// Start background services
 		go func() {
 			// Start web server in background
 			if !demoMode {
 				if err := webServer.Start(); err != nil {
-					log.Printf("Failed to start web server: %v", err)
+					logger.Error("Failed to start web server: %v", err)
 				}
 			}
 		}()
@@ -131,41 +139,46 @@ func main() {
 			})
 		}
 
-		// Start UI
+		// Start UI (blocking call)
+		logger.Info("Starting UI...")
 		if err := uiManager.Start(); err != nil {
 			log.Fatalf("Failed to start UI: %v", err)
 		}
+
+		// UI stopped, cleanup will be done by defer
+		logger.Info("UI stopped, main function returning...")
 
 	} else {
 		// Start web server (skip in demo mode)
 		if !demoMode {
 			if err := webServer.Start(); err != nil {
-				log.Fatalf("Failed to start web server: %v", err)
+				logger.Error("Failed to start web server: %v", err)
+				os.Exit(1)
 			}
 		} else {
-			fmt.Printf("[MAIN] Demo mode: skipping web server startup\n")
-			fmt.Printf("[MAIN] Demo mode: running sync service only\n")
+			logger.Info("Demo mode: skipping web server startup")
+			logger.Info("Demo mode: running sync service only")
 
 			// In demo mode, run a simple loop to demonstrate sync
 			go func() {
 				ticker := time.NewTicker(30 * time.Second)
 				defer ticker.Stop()
 
-				fmt.Printf("[DEMO] Starting demo sync loop (press Ctrl+C to exit)\n")
+				logger.Info("Starting demo sync loop (press Ctrl+C to exit)")
 
 				for range ticker.C {
-					fmt.Printf("[DEMO] Performing sync at %s\n", time.Now().Format("15:04:05"))
+					logger.Info("Performing sync at %s", time.Now().Format("15:04:05"))
 					if err := syncService.Start(); err != nil {
-						fmt.Printf("[DEMO] Sync error: %v\n", err)
+						logger.Error("Sync error: %v", err)
 					}
 
 					files, err := syncService.GetLocalFiles()
 					if err != nil {
-						fmt.Printf("[DEMO] Error getting local files: %v\n", err)
+						logger.Error("Error getting local files: %v", err)
 					} else {
-						fmt.Printf("[DEMO] Local files: %d\n", len(files))
+						logger.Info("Local files: %d", len(files))
 						for _, file := range files {
-							fmt.Printf("[DEMO]   - %s (size: %d)\n", file.Path, file.Size)
+							logger.Debug("File: %s (size: %d)", file.Path, file.Size)
 						}
 					}
 				}

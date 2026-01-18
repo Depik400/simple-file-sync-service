@@ -14,6 +14,7 @@ import (
 
 	"file-sync/config"
 	"file-sync/db"
+	"file-sync/logger"
 	"file-sync/p2p"
 	"file-sync/ui"
 )
@@ -42,9 +43,9 @@ func (fs *FileSync) SetUIManager(uiManager *ui.UIManager) {
 }
 
 func (fs *FileSync) Start() error {
-	fmt.Printf("[SYNC] Starting file sync service for server %s\n", fs.config.Server.Name)
-	fmt.Printf("[SYNC] Sync directory: %s\n", fs.config.Server.SyncDir)
-	fmt.Printf("[SYNC] Sync interval: %d seconds\n", fs.config.Sync.Interval)
+	logger.Info("Starting file sync service for server %s", fs.config.Server.Name)
+	logger.Info("Sync directory: %s", fs.config.Server.SyncDir)
+	logger.Info("Sync interval: %d seconds", fs.config.Sync.Interval)
 
 	// Ensure sync directory exists
 	if err := os.MkdirAll(fs.config.Server.SyncDir, 0755); err != nil {
@@ -53,13 +54,13 @@ func (fs *FileSync) Start() error {
 
 	// Clean up orphaned temp files from previous failed downloads
 	if err := fs.cleanupOrphanedTempFiles(); err != nil {
-		fmt.Printf("[SYNC] WARNING: Failed to cleanup temp files: %v\n", err)
+		logger.Warn("Failed to cleanup temp files: %v", err)
 	}
 
 	// Start periodic sync
 	go fs.syncRoutine()
 
-	fmt.Printf("[SYNC] File sync service started successfully\n")
+	logger.Info("File sync service started successfully")
 	return nil
 }
 
@@ -67,32 +68,32 @@ func (fs *FileSync) syncRoutine() {
 	ticker := time.NewTicker(time.Duration(fs.config.Sync.Interval) * time.Second)
 	defer ticker.Stop()
 
-	fmt.Printf("[SYNC] Starting sync routine with %d second intervals\n", fs.config.Sync.Interval)
+	logger.Info("Starting sync routine with %d second intervals", fs.config.Sync.Interval)
 
 	for range ticker.C {
-		fmt.Printf("[SYNC] Starting periodic sync at %s\n", time.Now().Format("15:04:05"))
+		logger.Debug("Starting periodic sync at %s", time.Now().Format("15:04:05"))
 		if err := fs.performSync(); err != nil {
-			fmt.Printf("[SYNC] ERROR: Sync failed: %v\n", err)
+			logger.Error("Sync failed: %v", err)
 		} else {
-			fmt.Printf("[SYNC] Periodic sync completed successfully\n")
+			logger.Debug("Periodic sync completed successfully")
 		}
 	}
 }
 
 func (fs *FileSync) performSync() error {
-	fmt.Printf("[SYNC] Performing sync operation...\n")
+	logger.Debug("Performing sync operation")
 
 	// Get local files
-	fmt.Printf("[SYNC] Scanning local directory: %s\n", fs.config.Server.SyncDir)
+	logger.Debug("Scanning local directory: %s", fs.config.Server.SyncDir)
 	localFiles, err := fs.scanDirectory(fs.config.Server.SyncDir)
 	if err != nil {
 		return fmt.Errorf("failed to scan local directory: %w", err)
 	}
-	fmt.Printf("[SYNC] Found %d local files\n", len(localFiles))
+	logger.Debug("Found %d local files", len(localFiles))
 
 	// Log local files
 	for _, file := range localFiles {
-		fmt.Printf("[SYNC] Local file: %s (hash: %s, size: %d)\n", file.Path, file.Hash[:8]+"...", file.Size)
+		logger.Debug("Local file: %s (hash: %s, size: %d)", file.Path, file.Hash[:8]+"...", file.Size)
 	}
 
 	// Create current files map for quick lookup
@@ -104,38 +105,38 @@ func (fs *FileSync) performSync() error {
 	// Detect deleted files
 	deletedFiles := fs.detectDeletedFiles(currentFiles)
 	if len(deletedFiles) > 0 {
-		fmt.Printf("[SYNC] Detected %d deleted files\n", len(deletedFiles))
+		logger.Info("Detected %d deleted files", len(deletedFiles))
 		for _, file := range deletedFiles {
-			fmt.Printf("[SYNC] Deleted file: %s\n", file.Path)
+			logger.Debug("Deleted file: %s", file.Path)
 		}
 	}
 
 	// Broadcast file list and deletions to peers
-	fmt.Printf("[SYNC] Broadcasting file list to %d peers\n", len(fs.p2p.GetPeers()))
+	logger.Debug("Broadcasting file list to %d peers", len(fs.p2p.GetPeers()))
 	if err := fs.p2p.BroadcastFileList(localFiles); err != nil {
-		fmt.Printf("[SYNC] WARNING: Failed to broadcast file list: %v\n", err)
+		logger.Warn("Failed to broadcast file list: %v", err)
 		// Continue anyway - this is not fatal
 	}
 
 	// Broadcast deletions to peers
 	if len(deletedFiles) > 0 {
-		fmt.Printf("[SYNC] Broadcasting deletions to peers\n")
+		logger.Debug("Broadcasting deletions to peers")
 		if err := fs.p2p.BroadcastDeletions(deletedFiles); err != nil {
-			fmt.Printf("[SYNC] WARNING: Failed to broadcast deletions: %v\n", err)
+			logger.Warn("Failed to broadcast deletions: %v", err)
 		}
 	}
 
 	// Record local changes
-	fmt.Printf("[SYNC] Recording local file changes to database\n")
+	logger.Debug("Recording local file changes to database")
 	if err := fs.recordLocalChanges(localFiles); err != nil {
 		return fmt.Errorf("failed to record local changes: %w", err)
 	}
 
 	// Record deletions
 	if len(deletedFiles) > 0 {
-		fmt.Printf("[SYNC] Recording file deletions to database\n")
+		logger.Debug("Recording file deletions to database")
 		if err := fs.recordDeletions(deletedFiles); err != nil {
-			fmt.Printf("[SYNC] WARNING: Failed to record deletions: %v\n", err)
+			logger.Warn("Failed to record deletions: %v", err)
 		}
 	}
 
@@ -143,19 +144,19 @@ func (fs *FileSync) performSync() error {
 	fs.previousFiles = currentFiles
 
 	// Check for files to download from peers
-	fmt.Printf("[SYNC] Checking for files to download from peers\n")
+	logger.Debug("Checking for files to download from peers")
 	if err := fs.syncFromPeers(); err != nil {
-		fmt.Printf("[SYNC] WARNING: Failed to sync from peers: %v\n", err)
+		logger.Warn("Failed to sync from peers: %v", err)
 	}
 
-	fmt.Printf("[SYNC] Sync operation completed\n")
+	logger.Debug("Sync operation completed")
 	return nil
 }
 
 func (fs *FileSync) scanDirectory(dir string) ([]p2p.FileInfo, error) {
 	var files []p2p.FileInfo
 
-	fmt.Printf("[SYNC] Scanning directory: %s\n", dir)
+	logger.Debug("Scanning directory: %s", dir)
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -166,7 +167,7 @@ func (fs *FileSync) scanDirectory(dir string) ([]p2p.FileInfo, error) {
 			return nil
 		}
 
-		fmt.Printf("[SYNC] Found file: %s\n", path)
+		logger.Debug("Found file: %s", path)
 
 		// Get relative path
 		relPath, err := filepath.Rel(dir, path)
@@ -177,7 +178,7 @@ func (fs *FileSync) scanDirectory(dir string) ([]p2p.FileInfo, error) {
 		// Skip certain files that shouldn't be synced
 		fileName := filepath.Base(path)
 		if fs.shouldSkipFile(fileName) {
-			fmt.Printf("[SYNC] Skipping file: %s (filtered out)\n", fileName)
+			logger.Debug("Skipping file: %s (filtered out)", fileName)
 			return nil
 		}
 
@@ -194,12 +195,12 @@ func (fs *FileSync) scanDirectory(dir string) ([]p2p.FileInfo, error) {
 			Modified: info.ModTime(),
 		}
 
-		fmt.Printf("[SYNC] Added to sync list: %s (hash: %s, size: %d)\n", relPath, hash[:8]+"...", info.Size())
+		logger.Debug("Added to sync list: %s (hash: %s, size: %d)", relPath, hash[:8]+"...", info.Size())
 		files = append(files, fileInfo)
 		return nil
 	})
 
-	fmt.Printf("[SYNC] Scan completed, found %d files\n", len(files))
+	logger.Debug("Scan completed, found %d files", len(files))
 	return files, err
 }
 
@@ -214,7 +215,7 @@ func (fs *FileSync) GetP2PNetwork() *p2p.P2PNetwork {
 }
 
 func (fs *FileSync) cleanupOrphanedTempFiles() error {
-	fmt.Printf("[SYNC] Cleaning up orphaned temp files...\n")
+	logger.Debug("Cleaning up orphaned temp files")
 
 	return filepath.Walk(fs.config.Server.SyncDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -231,17 +232,17 @@ func (fs *FileSync) cleanupOrphanedTempFiles() error {
 			finalPath := strings.TrimSuffix(path, ".tmp")
 			if _, err := os.Stat(finalPath); os.IsNotExist(err) {
 				// Final file doesn't exist, this is an orphaned temp file
-				fmt.Printf("[SYNC] Removing orphaned temp file: %s\n", path)
+				logger.Info("Removing orphaned temp file: %s", path)
 				if err := os.Remove(path); err != nil {
-					fmt.Printf("[SYNC] WARNING: Failed to remove orphaned temp file %s: %v\n", path, err)
+					logger.Warn("Failed to remove orphaned temp file %s: %v", path, err)
 				}
 			} else {
 				// Final file exists, check if temp file is newer (indicates failed rename)
 				if finalInfo, err := os.Stat(finalPath); err == nil {
 					if info.ModTime().After(finalInfo.ModTime()) {
-						fmt.Printf("[SYNC] Removing stale temp file (newer than final): %s\n", path)
+						logger.Info("Removing stale temp file (newer than final): %s", path)
 						if err := os.Remove(path); err != nil {
-							fmt.Printf("[SYNC] WARNING: Failed to remove stale temp file %s: %v\n", path, err)
+							logger.Warn("Failed to remove stale temp file %s: %v", path, err)
 						}
 					}
 				}
@@ -265,7 +266,7 @@ func (fs *FileSync) shouldSkipFile(fileName string) bool {
 
 	// Skip temporary files (including .tmp files from downloads)
 	if strings.HasSuffix(fileName, ".tmp") || strings.HasSuffix(fileName, ".temp") {
-		fmt.Printf("[SYNC] Skipping temporary file: %s\n", fileName)
+		logger.Debug("Skipping temporary file: %s", fileName)
 		return true
 	}
 
@@ -342,7 +343,7 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 
 	// Calculate adaptive chunk size based on file size and concurrency
 	chunkSize := fs.calculateAdaptiveChunkSize(fileSize, maxConcurrency)
-	fmt.Printf("[SYNC] Starting parallel download of %s (size: %d bytes, chunk size: %d bytes, concurrency: %d)\n",
+	logger.Info("Starting parallel download of %s (size: %d bytes, chunk size: %d bytes, concurrency: %d)",
 		filePath, fileSize, chunkSize, maxConcurrency)
 
 	// Update UI with download start
@@ -374,7 +375,7 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 		}
 	}
 
-	fmt.Printf("[SYNC] File divided into %d chunks\n", len(ranges))
+	logger.Debug("File divided into %d chunks", len(ranges))
 
 	// Create temporary file (atomic creation)
 	tempPath := localPath + ".tmp"
@@ -415,31 +416,31 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 		go func(workerID int, cr chunkRange) {
 			defer wg.Done()
 
-			fmt.Printf("[SYNC] Worker %d starting chunk %d-%d (%d bytes)\n",
+			logger.Debug("Worker %d starting chunk %d-%d (%d bytes)",
 				workerID, cr.start, cr.end, cr.end-cr.start+1)
 
 			// Check if an error already occurred in another worker
 			select {
 			case <-errorOccurred:
 				// Another worker failed, abort this one too
-				fmt.Printf("[SYNC] Worker %d aborted due to error in another worker\n", workerID)
+				logger.Debug("Worker %d aborted due to error in another worker", workerID)
 				results <- chunkResult{range_: cr, err: fmt.Errorf("aborted due to error in another worker")}
 				return
 			default:
 			}
 
 			// Acquire semaphore
-			fmt.Printf("[SYNC] Worker %d waiting for semaphore...\n", workerID)
+			logger.Debug("Worker %d waiting for semaphore", workerID)
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			fmt.Printf("[SYNC] Worker %d acquired semaphore\n", workerID)
+			logger.Debug("Worker %d acquired semaphore", workerID)
 
-			fmt.Printf("[SYNC] Worker %d downloading chunk %d-%d (%d bytes)\n",
+			logger.Debug("Worker %d downloading chunk %d-%d (%d bytes)",
 				workerID, cr.start, cr.end, cr.end-cr.start+1)
 
 			reader, _, err := fs.p2p.RequestFileRange(serverName, filePath, cr.start, cr.end)
 			if err != nil {
-				fmt.Printf("[SYNC] Worker %d failed to request range: %v\n", workerID, err)
+				logger.Error("Worker %d failed to request range: %v", workerID, err)
 				select {
 				case errorOccurred <- struct{}{}: // Signal error to other workers
 				default:
@@ -453,7 +454,7 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 			expectedSize := cr.end - cr.start + 1
 			chunkData := make([]byte, expectedSize)
 
-			fmt.Printf("[SYNC] Worker %d reading %d bytes...\n", workerID, expectedSize)
+			logger.Debug("Worker %d reading %d bytes", workerID, expectedSize)
 
 			// Read data with optimized buffering
 			totalRead := int64(0)
@@ -463,13 +464,13 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 				n, err := bufReader.Read(chunkData[totalRead:])
 				if n > 0 {
 					totalRead += int64(n)
-					fmt.Printf("[SYNC] Worker %d read %d/%d bytes\n", workerID, totalRead, expectedSize)
+					logger.Debug("Worker %d read %d/%d bytes", workerID, totalRead, expectedSize)
 				}
 				if err != nil {
 					if err == io.EOF {
 						break
 					}
-					fmt.Printf("[SYNC] Worker %d read error: %v\n", workerID, err)
+					logger.Error("Worker %d read error: %v", workerID, err)
 					select {
 					case errorOccurred <- struct{}{}: // Signal error to other workers
 					default:
@@ -481,7 +482,7 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 
 			if totalRead != expectedSize {
 				err := fmt.Errorf("read size mismatch: expected %d, got %d", expectedSize, totalRead)
-				fmt.Printf("[SYNC] Worker %d size mismatch: %v\n", workerID, err)
+				logger.Error("Worker %d size mismatch: %v", workerID, err)
 				select {
 				case errorOccurred <- struct{}{}: // Signal error to other workers
 				default:
@@ -490,16 +491,16 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 				return
 			}
 
-			fmt.Printf("[SYNC] Worker %d completed chunk successfully\n", workerID)
+			logger.Debug("Worker %d completed chunk successfully", workerID)
 			results <- chunkResult{range_: cr, data: chunkData}
 		}(i, r)
 	}
 
 	// Close results channel when all workers are done
 	go func() {
-		fmt.Printf("[SYNC] Waiting for all workers to complete...\n")
+		logger.Debug("Waiting for all workers to complete...")
 		wg.Wait()
-		fmt.Printf("[SYNC] All workers completed, closing results channel\n")
+		logger.Debug("All workers completed, closing results channel")
 		close(results)
 	}()
 
@@ -509,32 +510,32 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 	hasError := false
 	errorDetails := make([]string, 0)
 
-	fmt.Printf("[SYNC] Waiting for %d chunk results...\n", len(ranges))
+	logger.Debug("Waiting for %d chunk results...", len(ranges))
 
 	for result := range results {
 		chunksReceived++
 
-		fmt.Printf("[SYNC] Received result %d/%d for chunk %d-%d\n",
+		logger.Debug("Received result %d/%d for chunk %d-%d",
 			chunksReceived, len(ranges), result.range_.start, result.range_.end)
 
 		// Check for errors in chunks
 		if result.err != nil {
 			errorMsg := fmt.Sprintf("chunk %d-%d failed: %v", result.range_.start, result.range_.end, result.err)
 			errorDetails = append(errorDetails, errorMsg)
-			fmt.Printf("[SYNC] ERROR: %s\n", errorMsg)
+			logger.Error("Chunk error: %s", errorMsg)
 			hasError = true
 			continue // Continue to drain the channel
 		}
 
 		// Skip writing if we already had an error
 		if hasError {
-			fmt.Printf("[SYNC] Skipping chunk %d-%d due to previous error\n",
+			logger.Debug("Skipping chunk %d-%d due to previous error",
 				result.range_.start, result.range_.end)
 			continue
 		}
 
 		// Write chunk to file
-		fmt.Printf("[SYNC] Writing chunk %d-%d (%d bytes) to file\n",
+		logger.Debug("Writing chunk %d-%d (%d bytes) to file",
 			result.range_.start, result.range_.end, len(result.data))
 		if _, err := file.WriteAt(result.data, result.range_.start); err != nil {
 			hasError = true
@@ -544,7 +545,7 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 		}
 
 		totalDownloaded += int64(len(result.data))
-		fmt.Printf("[SYNC] Chunk %d-%d written (%d/%d bytes total, %d/%d chunks)\n",
+		logger.Debug("Chunk %d-%d written (%d/%d bytes total, %d/%d chunks)",
 			result.range_.start, result.range_.end, totalDownloaded, fileSize, chunksReceived, len(ranges))
 
 		// Update UI with progress
@@ -563,7 +564,7 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 		}
 	}
 
-	fmt.Printf("[SYNC] Finished receiving chunks: %d received, %d expected\n", chunksReceived, len(ranges))
+	logger.Info("Finished receiving chunks: %d received, %d expected", chunksReceived, len(ranges))
 
 	// If there was an error, clean up and return it with details
 	if hasError {
@@ -590,14 +591,14 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 		return fmt.Errorf("incomplete write: expected %d bytes, wrote %d bytes", fileSize, totalDownloaded)
 	}
 
-	fmt.Printf("[SYNC] Syncing file to disk...\n")
+	logger.Debug("Syncing file to disk...")
 	// Sync file to disk before closing
 	if err := file.Sync(); err != nil {
 		file.Close()
 		os.Remove(tempPath) // Clean up temp file on error
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
-	fmt.Printf("[SYNC] File synced to disk successfully\n")
+	logger.Debug("File synced to disk successfully")
 
 	// Close file
 	file.Close()
@@ -615,24 +616,24 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 	}
 
 	// Final verification - check file size on disk
-	fmt.Printf("[SYNC] Verifying downloaded file...\n")
+	logger.Debug("Verifying downloaded file...")
 	if info, err := os.Stat(tempPath); err != nil {
-		fmt.Printf("[SYNC] ERROR: Failed to stat temp file: %v\n", err)
+		logger.Error("Failed to stat temp file: %v", err)
 		os.Remove(tempPath) // Clean up temp file on error
 		return fmt.Errorf("failed to verify temp file: %w", err)
 	} else if info.Size() != fileSize {
-		fmt.Printf("[SYNC] ERROR: File size mismatch on disk: expected %d, got %d\n", fileSize, info.Size())
+		logger.Error("File size mismatch on disk: expected %d, got %d", fileSize, info.Size())
 		os.Remove(tempPath) // Clean up temp file on error
 		return fmt.Errorf("file size mismatch on disk: expected %d, got %d", fileSize, info.Size())
 	}
 
-	fmt.Printf("[SYNC] File verification passed, renaming %s to %s\n", tempPath, localPath)
+	logger.Info("File verification passed, renaming %s to %s", tempPath, localPath)
 	if err := os.Rename(tempPath, localPath); err != nil {
-		fmt.Printf("[SYNC] ERROR: Failed to rename temp file: %v\n", err)
+		logger.Error("Failed to rename temp file: %v", err)
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
-	fmt.Printf("[SYNC] Parallel download completed successfully: %s (%d bytes)\n", filePath, totalDownloaded)
+	logger.Info("Parallel download completed successfully: %s (%d bytes)", filePath, totalDownloaded)
 
 	// Update UI with completion
 	if fs.uiManager != nil {
@@ -661,7 +662,7 @@ func (fs *FileSync) downloadFileWithConcurrency(serverName, filePath string, max
 
 	// Record the download
 	if err := fs.db.RecordFileChange(filePath, hash, fileSize, time.Now(), fs.config.Server.Name, "downloaded"); err != nil {
-		fmt.Printf("[SYNC] WARNING: Failed to record download: %v\n", err)
+		logger.Warn("Failed to record download: %v", err)
 	}
 
 	return nil
@@ -713,7 +714,7 @@ func (fs *FileSync) DownloadFile(serverName, filePath string) error {
 
 	// Check if another process is already downloading this file
 	if _, err := os.Stat(tempPath); err == nil {
-		fmt.Printf("[SYNC] File %s is already being downloaded by another process, skipping\n", filePath)
+		logger.Warn("File %s is already being downloaded by another process, skipping", filePath)
 		return nil // Skip download, another process is handling it
 	}
 
@@ -722,7 +723,7 @@ func (fs *FileSync) DownloadFile(serverName, filePath string) error {
 
 	// Check if file already exists and is complete
 	if info, err := os.Stat(localPath); err == nil {
-		fmt.Printf("[SYNC] File %s already exists (%d bytes), skipping download\n", filePath, info.Size())
+		logger.Info("File %s already exists (%d bytes), skipping download", filePath, info.Size())
 		return nil
 	}
 
@@ -738,15 +739,15 @@ func (fs *FileSync) DownloadFile(serverName, filePath string) error {
 	maxConcurrency := fs.config.Sync.MaxParallelChunks
 
 	if fileSize >= minParallelSize && maxConcurrency > 1 {
-		fmt.Printf("[SYNC] Using parallel download for large file %s (%d bytes)\n", filePath, fileSize)
+		logger.Info("Using parallel download for large file %s (%d bytes)", filePath, fileSize)
 		err := fs.downloadFileWithConcurrency(serverName, filePath, maxConcurrency)
 		if err != nil {
-			fmt.Printf("[SYNC] Parallel download failed for %s, falling back to sequential: %v\n", filePath, err)
+			logger.Warn("Parallel download failed for %s, falling back to sequential: %v", filePath, err)
 			return fs.downloadFileSequential(serverName, filePath)
 		}
 		return nil
 	} else {
-		fmt.Printf("[SYNC] Using sequential download for file %s (%d bytes)\n", filePath, fileSize)
+		logger.Info("Using sequential download for file %s (%d bytes)", filePath, fileSize)
 		return fs.downloadFileSequential(serverName, filePath)
 	}
 }
@@ -757,13 +758,13 @@ func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 
 	// Check if another process is already downloading this file
 	if _, err := os.Stat(tempPath); err == nil {
-		fmt.Printf("[SYNC] Sequential download: File %s is already being downloaded by another process, skipping\n", filePath)
+		logger.Warn("Sequential download: File %s is already being downloaded by another process, skipping", filePath)
 		return nil // Skip download, another process is handling it
 	}
 
 	// Check if file already exists and is complete
 	if info, err := os.Stat(localPath); err == nil {
-		fmt.Printf("[SYNC] Sequential download: File %s already exists (%d bytes), skipping\n", filePath, info.Size())
+		logger.Info("Sequential download: File %s already exists (%d bytes), skipping", filePath, info.Size())
 		return nil
 	}
 
@@ -776,13 +777,13 @@ func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 	var existingSize int64 = 0
 	if info, err := os.Stat(tempPath); err == nil {
 		existingSize = info.Size()
-		fmt.Printf("[SYNC] Sequential download: Resuming from temp file, offset: %d bytes\n", existingSize)
+		logger.Info("Sequential download: Resuming from temp file, offset: %d bytes", existingSize)
 		// Rename temp file to continue download
 		if err := os.Rename(tempPath, localPath); err != nil {
 			return fmt.Errorf("failed to resume from temp file: %w", err)
 		}
 	} else {
-		fmt.Printf("[SYNC] Sequential download: Starting fresh download\n")
+		logger.Info("Sequential download: Starting fresh download")
 	}
 
 	// Request file with offset support
@@ -806,7 +807,7 @@ func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 			os.Remove(tempPath)
 			return fmt.Errorf("failed to seek in temp file: %w", err)
 		}
-		fmt.Printf("[SYNC] Sequential download: Resumed at offset %d bytes\n", existingSize)
+		logger.Info("Sequential download: Resumed at offset %d bytes", existingSize)
 	}
 
 	// Copy data with optimized buffering
@@ -837,7 +838,7 @@ func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 			// Progress logging (every 10MB)
 			if totalDownloaded%int64(10*1024*1024) == 0 {
 				progress := float64(totalDownloaded) / float64(fileSize) * 100
-				fmt.Printf("[SYNC] Download progress: %.1f%% (%d/%d bytes)\n",
+				logger.Info("Download progress: %.1f%% (%d/%d bytes)",
 					progress, totalDownloaded, fileSize)
 			}
 		}
@@ -855,7 +856,7 @@ func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 		return fmt.Errorf("failed to flush buffer: %w", err)
 	}
 
-	fmt.Printf("[SYNC] Sequential download completed: %s (%d bytes)\n", filePath, totalDownloaded)
+	logger.Info("Sequential download completed: %s (%d bytes)", filePath, totalDownloaded)
 
 	// Sync file to disk
 	if err := file.Sync(); err != nil {
@@ -870,7 +871,7 @@ func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 	// Verify file size
 	if fileSize > 0 && totalDownloaded != fileSize {
 		os.Remove(tempPath)
-		fmt.Printf("[SYNC] ERROR: Sequential download size mismatch: expected %d, got %d\n", fileSize, totalDownloaded)
+		logger.Error("Sequential download size mismatch: expected %d, got %d", fileSize, totalDownloaded)
 		return fmt.Errorf("file size mismatch: expected %d, got %d", fileSize, totalDownloaded)
 	}
 
@@ -888,31 +889,31 @@ func (fs *FileSync) downloadFileSequential(serverName, filePath string) error {
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
-	fmt.Printf("[SYNC] Sequential download verification passed, calculating hash...\n")
+	logger.Info("Sequential download verification passed, calculating hash...")
 
 	// Calculate hash for verification
 	hash, err := fs.calculateFileHash(localPath)
 	if err != nil {
-		fmt.Printf("[SYNC] ERROR: Failed to calculate hash: %v\n", err)
+		logger.Error("Failed to calculate hash: %v", err)
 		return fmt.Errorf("failed to calculate hash: %w", err)
 	}
 
-	fmt.Printf("[SYNC] Hash calculated: %s, recording to database...\n", hash[:16]+"...")
+	logger.Info("Hash calculated: %s, recording to database...", hash[:16]+"...")
 
 	// Record the download
 	info, err := os.Stat(localPath)
 	if err != nil {
-		fmt.Printf("[SYNC] ERROR: Failed to stat final file: %v\n", err)
+		logger.Error("Failed to stat final file: %v", err)
 		return err
 	}
 
 	err = fs.db.RecordFileChange(filePath, hash, info.Size(), info.ModTime(), fs.config.Server.Name, "downloaded")
 	if err != nil {
-		fmt.Printf("[SYNC] ERROR: Failed to record to database: %v\n", err)
+		logger.Error("Failed to record to database: %v", err)
 		return err
 	}
 
-	fmt.Printf("[SYNC] Sequential download fully completed for %s\n", filePath)
+	logger.Info("Sequential download fully completed for %s", filePath)
 	return nil
 }
 
@@ -950,13 +951,13 @@ func (fs *FileSync) recordDeletions(deletedFiles []p2p.FileInfo) error {
 }
 
 func (fs *FileSync) ApplyDeletion(serverName, filePath string) error {
-	fmt.Printf("[SYNC] Applying deletion from %s: %s\n", serverName, filePath)
+	logger.Info("Applying deletion from %s: %s", serverName, filePath)
 
 	localPath := filepath.Join(fs.config.Server.SyncDir, filePath)
 
 	// Check if file exists
 	if _, err := os.Stat(localPath); os.IsNotExist(err) {
-		fmt.Printf("[SYNC] File %s already deleted or never existed\n", filePath)
+		logger.Info("File %s already deleted or never existed", filePath)
 		return nil
 	}
 
@@ -965,11 +966,11 @@ func (fs *FileSync) ApplyDeletion(serverName, filePath string) error {
 		return fmt.Errorf("failed to delete file %s: %w", localPath, err)
 	}
 
-	fmt.Printf("[SYNC] Successfully deleted file: %s\n", filePath)
+	logger.Info("Successfully deleted file: %s", filePath)
 
 	// Record the deletion in our history
 	if err := fs.db.RecordFileChange(filePath, "", 0, time.Now(), fs.config.Server.Name, "deleted_by_peer"); err != nil {
-		fmt.Printf("[SYNC] WARNING: Failed to record deletion: %v\n", err)
+		logger.Warn("Failed to record deletion: %v", err)
 	}
 
 	return nil
@@ -978,16 +979,16 @@ func (fs *FileSync) ApplyDeletion(serverName, filePath string) error {
 func (fs *FileSync) syncFromPeers() error {
 	peers := fs.p2p.GetPeers()
 	if len(peers) == 0 {
-		fmt.Printf("[SYNC] No peers available for syncing\n")
+		logger.Info("No peers available for syncing")
 		return nil
 	}
 
-	fmt.Printf("[SYNC] Checking %d peers for new files\n", len(peers))
+	logger.Info("Checking %d peers for new files", len(peers))
 
 	// Query each peer for their file lists
 	for peerName := range peers {
 		if err := fs.requestFileListFromPeer(peerName); err != nil {
-			fmt.Printf("[SYNC] WARNING: Failed to get file list from peer %s: %v\n", peerName, err)
+			logger.Warn("Failed to get file list from peer %s: %v", peerName, err)
 			// Continue with other peers
 		}
 	}
@@ -996,7 +997,7 @@ func (fs *FileSync) syncFromPeers() error {
 }
 
 func (fs *FileSync) requestFileListFromPeer(peerName string) error {
-	fmt.Printf("[SYNC] Requesting file list from peer: %s\n", peerName)
+	logger.Info("Requesting file list from peer: %s", peerName)
 
 	// Send a request for file list to the peer
 	// This would trigger the peer to send us their current file list
@@ -1012,7 +1013,7 @@ func (fs *FileSync) requestFileListFromPeer(peerName string) error {
 }
 
 func (fs *FileSync) RequestSyncFromPeer(peerName string) error {
-	fmt.Printf("[SYNC] Requesting sync from peer: %s\n", peerName)
+	logger.Info("Requesting sync from peer: %s", peerName)
 
 	// This would be called when receiving a file list from a peer
 	// For now, we'll implement basic logic to request missing files

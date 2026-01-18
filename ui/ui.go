@@ -2,35 +2,39 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"file-sync/logger"
+
+	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
 
 // DownloadStatus represents the status of a file download
 type DownloadStatus struct {
-	FilePath      string
-	ServerName    string
-	Status        string // "downloading", "completed", "failed", "paused"
-	Progress      float64 // 0.0 to 100.0
-	Speed         int64   // bytes per second
-	TotalBytes    int64
-	Downloaded    int64
-	StartTime     time.Time
-	LastUpdate    time.Time
-	Error         string
+	FilePath   string
+	ServerName string
+	Status     string  // "downloading", "completed", "failed", "paused"
+	Progress   float64 // 0.0 to 100.0
+	Speed      int64   // bytes per second
+	TotalBytes int64
+	Downloaded int64
+	StartTime  time.Time
+	LastUpdate time.Time
+	Error      string
 }
 
 // ServerStatus represents the status of a peer server
 type ServerStatus struct {
-	Name         string
-	Host         string
-	Port         int
-	Status       string // "online", "offline", "syncing"
-	LastSeen     time.Time
-	FilesCount   int
-	TotalSize    int64
+	Name       string
+	Host       string
+	Port       int
+	Status     string // "online", "offline", "syncing"
+	LastSeen   time.Time
+	FilesCount int
+	TotalSize  int64
 }
 
 // UIManager manages the terminal UI
@@ -39,9 +43,11 @@ type UIManager struct {
 	downloadsTable *tview.Table
 	serversTable   *tview.Table
 	statusText     *tview.TextView
+	logsText       *tview.TextView
 	downloads      map[string]*DownloadStatus
 	servers        map[string]*ServerStatus
 	mutex          sync.RWMutex
+	stopChan       chan struct{} // Channel to signal stopping
 }
 
 // NewUIManager creates a new UI manager
@@ -49,6 +55,7 @@ func NewUIManager() *UIManager {
 	return &UIManager{
 		downloads: make(map[string]*DownloadStatus),
 		servers:   make(map[string]*ServerStatus),
+		stopChan:  make(chan struct{}),
 	}
 }
 
@@ -62,7 +69,7 @@ func (ui *UIManager) Start() error {
 	// Header
 	header := tview.NewTextView().
 		SetTextAlign(tview.AlignCenter).
-		SetText("File Sync Monitor - Press 'q' to quit, 'r' to refresh")
+		SetText("File Sync Monitor - Press 'q' or 'Esc' to quit, 'r' to refresh")
 	header.SetBorder(true).SetTitle("File Sync v1.0")
 
 	// Downloads table
@@ -83,23 +90,51 @@ func (ui *UIManager) Start() error {
 		SetWordWrap(true)
 	ui.statusText.SetBorder(true).SetTitle("Status")
 
+	// Logs text
+	ui.logsText = tview.NewTextView().
+		SetDynamicColors(true).
+		SetWordWrap(true).
+		SetScrollable(true)
+	ui.logsText.SetBorder(true).SetTitle("Recent Logs")
+
 	// Layout
 	tablesFlex := tview.NewFlex().
 		AddItem(ui.downloadsTable, 0, 2, false).
 		AddItem(ui.serversTable, 0, 1, false)
 
-	flex.AddItem(header, 3, 1, false).
-		AddItem(tablesFlex, 0, 3, false).
-		AddItem(ui.statusText, 4, 1, false)
+	bottomFlex := tview.NewFlex().
+		AddItem(ui.statusText, 0, 1, false).
+		AddItem(ui.logsText, 0, 1, false)
 
-	// Set up basic key handling - we'll add proper event handling later
-	go func() {
-		// Simple exit mechanism - stop after 30 seconds for testing
-		time.Sleep(30 * time.Second)
-		ui.app.QueueUpdateDraw(func() {
+	flex.AddItem(header, 3, 1, false).
+		AddItem(tablesFlex, 0, 4, false).
+		AddItem(bottomFlex, 0, 2, false)
+
+	// Set up key handling for exit
+	ui.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape || event.Rune() == 'q' {
+			logger.Info("UI exit requested by user")
+			// Signal updateLoop to stop immediately
+			select {
+			case <-ui.stopChan:
+				// Already closed
+			default:
+				close(ui.stopChan)
+			}
+
+			// Stop the app immediately - this will cause ui.Start() to return
+			logger.Info("Stopping UI application...")
 			ui.app.Stop()
-		})
-	}()
+			return nil
+		}
+		if event.Rune() == 'r' {
+			ui.app.QueueUpdateDraw(func() {
+				ui.updateDisplay()
+			})
+			return nil
+		}
+		return event
+	})
 
 	// Initial display update
 	ui.updateDisplay()
@@ -121,6 +156,9 @@ func (ui *UIManager) updateLoop() {
 			ui.app.QueueUpdateDraw(func() {
 				ui.updateDisplay()
 			})
+		case <-ui.stopChan:
+			logger.Debug("UI update loop stopped")
+			return
 		}
 	}
 }
@@ -133,6 +171,7 @@ func (ui *UIManager) updateDisplay() {
 	ui.updateDownloadsTable()
 	ui.updateServersTable()
 	ui.updateStatusText()
+	ui.updateLogsText()
 }
 
 // updateDownloadsTable updates the downloads table
@@ -167,18 +206,18 @@ func (ui *UIManager) updateDownloadsTable() {
 		// ETA
 		etaStr := ui.calculateETA(download)
 
-	// Status with color
-	statusCell := tview.NewTableCell(download.Status)
-	switch download.Status {
-	case "downloading":
-		statusCell.SetTextColor(tview.Styles.PrimaryTextColor)
-	case "completed":
-		statusCell.SetTextColor(tview.Styles.SecondaryTextColor)
-	case "failed":
-		statusCell.SetTextColor(tview.Styles.TertiaryTextColor)
-	case "paused":
-		statusCell.SetTextColor(tview.Styles.ContrastSecondaryTextColor)
-	}
+		// Status with color
+		statusCell := tview.NewTableCell(download.Status)
+		switch download.Status {
+		case "downloading":
+			statusCell.SetTextColor(tview.Styles.PrimaryTextColor)
+		case "completed":
+			statusCell.SetTextColor(tview.Styles.SecondaryTextColor)
+		case "failed":
+			statusCell.SetTextColor(tview.Styles.TertiaryTextColor)
+		case "paused":
+			statusCell.SetTextColor(tview.Styles.ContrastSecondaryTextColor)
+		}
 
 		cells := []string{fileName, download.ServerName, progressBar, speedStr, download.Status, etaStr}
 		for col, cellText := range cells {
@@ -225,16 +264,16 @@ func (ui *UIManager) updateServersTable() {
 		// Last seen
 		lastSeenStr := ui.formatDuration(time.Since(server.LastSeen))
 
-	// Status with color
-	statusCell := tview.NewTableCell(server.Status)
-	switch server.Status {
+		// Status with color
+		statusCell := tview.NewTableCell(server.Status)
+		switch server.Status {
 		case "online":
 			statusCell.SetTextColor(tview.Styles.PrimaryTextColor)
 		case "offline":
 			statusCell.SetTextColor(tview.Styles.TertiaryTextColor)
 		case "syncing":
 			statusCell.SetTextColor(tview.Styles.ContrastSecondaryTextColor)
-	}
+		}
 
 		cells := []string{server.Name, address, server.Status,
 			fmt.Sprintf("%d", server.FilesCount), sizeStr, lastSeenStr}
@@ -286,6 +325,41 @@ func (ui *UIManager) updateStatusText() {
 		activeDownloads, ui.formatSpeed(totalSpeed), onlineServers, totalFiles, ui.formatSize(totalSize))
 
 	text.SetText(status)
+}
+
+// updateLogsText updates the logs display
+func (ui *UIManager) updateLogsText() {
+	logsText := ui.logsText
+	logsText.Clear()
+
+	// Get recent logs
+	recentLogs := logger.GetRecentLogs(20) // Last 20 log messages
+
+	if len(recentLogs) == 0 {
+		logsText.SetText("No logs available")
+		return
+	}
+
+	// Display logs with color coding
+	var coloredLogs []string
+	for _, logLine := range recentLogs {
+		coloredLine := logLine
+
+		// Color code based on log level
+		if strings.Contains(logLine, "[ERROR]") {
+			coloredLine = fmt.Sprintf("[red]%s[white]", logLine)
+		} else if strings.Contains(logLine, "[WARN]") {
+			coloredLine = fmt.Sprintf("[yellow]%s[white]", logLine)
+		} else if strings.Contains(logLine, "[DEBUG]") {
+			coloredLine = fmt.Sprintf("[blue]%s[white]", logLine)
+		} else if strings.Contains(logLine, "[INFO]") {
+			coloredLine = fmt.Sprintf("[green]%s[white]", logLine)
+		}
+
+		coloredLogs = append(coloredLogs, coloredLine)
+	}
+
+	logsText.SetText(strings.Join(coloredLogs, "\n"))
 }
 
 // createProgressBar creates a visual progress bar
@@ -428,6 +502,8 @@ func (ui *UIManager) RemoveDownload(filePath, serverName string) {
 
 // Stop stops the UI
 func (ui *UIManager) Stop() {
+	logger.Info("Stopping UI...")
+	close(ui.stopChan) // Signal updateLoop to stop
 	if ui.app != nil {
 		ui.app.Stop()
 	}
