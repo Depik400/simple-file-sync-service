@@ -26,6 +26,7 @@ type SyncConfig struct {
 	Interval               int `yaml:"interval"`
 	MaxConcurrentTransfers int `yaml:"max_concurrent_transfers"`
 	ChunkSize              int `yaml:"chunk_size"`
+	MaxParallelChunks      int `yaml:"max_parallel_chunks"`
 }
 
 type DatabaseConfig struct {

@@ -9,15 +9,22 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"file-sync/config"
 	"file-sync/db"
+	"file-sync/logger"
 	"file-sync/p2p"
 	"file-sync/sync"
 
 	"github.com/gorilla/mux"
 )
+
+type downloadTask struct {
+	peerName string
+	filePath string
+}
 
 type Server struct {
 	config *config.Config
@@ -25,15 +32,19 @@ type Server struct {
 	p2p    *p2p.P2PNetwork
 	sync   *sync.FileSync
 	router *mux.Router
+
+	// Queue for pending file downloads
+	downloadQueue chan downloadTask
 }
 
 func NewServer(cfg *config.Config, database *db.Database, p2pNet *p2p.P2PNetwork, syncService *sync.FileSync) *Server {
 	s := &Server{
-		config: cfg,
-		db:     database,
-		p2p:    p2pNet,
-		sync:   syncService,
-		router: mux.NewRouter(),
+		config:        cfg,
+		db:            database,
+		p2p:           p2pNet,
+		sync:          syncService,
+		router:        mux.NewRouter(),
+		downloadQueue: make(chan downloadTask, 100), // Buffer for 100 pending downloads
 	}
 
 	s.setupRoutes()
@@ -65,8 +76,39 @@ func (s *Server) setupRoutes() {
 }
 
 func (s *Server) Start() error {
-	fmt.Printf("Starting server on %s (web + P2P API)\n", s.config.GetServerAddr())
+	logger.Info("Starting server on %s (web + P2P API)", s.config.GetServerAddr())
+
+	// Start concurrent download workers
+	maxConcurrentDownloads := s.config.Sync.MaxConcurrentTransfers
+	if maxConcurrentDownloads <= 0 {
+		maxConcurrentDownloads = 3 // Default to 3 concurrent downloads
+	}
+
+	logger.Info("Starting %d concurrent download workers", maxConcurrentDownloads)
+	for i := 0; i < maxConcurrentDownloads; i++ {
+		go s.downloadWorker(i)
+	}
+
 	return http.ListenAndServe(s.config.GetServerAddr(), s.router)
+}
+
+func (s *Server) downloadWorker(workerID int) {
+	logger.Info("Download worker %d started", workerID)
+
+	for task := range s.downloadQueue {
+		logger.Info("Worker %d processing download: %s from %s",
+			workerID, task.filePath, task.peerName)
+
+		if err := s.sync.DownloadFile(task.peerName, task.filePath); err != nil {
+			logger.Error("Worker %d failed to download %s: %v",
+				workerID, task.filePath, err)
+		} else {
+			logger.Info("Worker %d successfully downloaded: %s",
+				workerID, task.filePath)
+		}
+	}
+
+	logger.Info("Download worker %d stopped", workerID)
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -186,89 +228,89 @@ func (s *Server) handleGetPeers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSyncMessage(w http.ResponseWriter, r *http.Request) {
 	var msg p2p.SyncMessage
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		fmt.Printf("[SERVER] ERROR: Failed to decode sync message: %v\n", err)
+		logger.Error("Failed to decode sync message: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	fmt.Printf("[SERVER] Received sync message from %s: type=%s\n", msg.Server, msg.Type)
+	logger.Info("Received sync message from %s: type=%s", msg.Server, msg.Type)
 
 	// Handle sync message based on type
 	switch msg.Type {
 	case "file_list":
-		fmt.Printf("[SERVER] Processing file list from peer %s\n", msg.Server)
+		logger.Info("Processing file list from peer %s", msg.Server)
 
 		// Extract file list from message
 		filesData, ok := msg.Data["files"]
 		if !ok {
-			fmt.Printf("[SERVER] ERROR: No files data in message from %s\n", msg.Server)
+			logger.Error("No files data in message from %s", msg.Server)
 			break
 		}
 
 		// Convert to proper format
 		filesJson, err := json.Marshal(filesData)
 		if err != nil {
-			fmt.Printf("[SERVER] ERROR: Failed to marshal files data: %v\n", err)
+			logger.Error("Failed to marshal files data: %v", err)
 			break
 		}
 
 		var remoteFiles []p2p.FileInfo
 		if err := json.Unmarshal(filesJson, &remoteFiles); err != nil {
-			fmt.Printf("[SERVER] ERROR: Failed to unmarshal files data: %v\n", err)
+			logger.Error("Failed to unmarshal files data: %v", err)
 			break
 		}
 
-		fmt.Printf("[SERVER] Received %d files from peer %s\n", len(remoteFiles), msg.Server)
+		logger.Info("Received %d files from peer %s", len(remoteFiles), msg.Server)
 
 		// Check which files we need to download
 		if err := s.checkAndDownloadMissingFiles(msg.Server, remoteFiles); err != nil {
-			fmt.Printf("[SERVER] ERROR: Failed to sync files from %s: %v\n", msg.Server, err)
+			logger.Error("Failed to sync files from %s: %v", msg.Server, err)
 		}
 
 	case "request_file_list":
-		fmt.Printf("[SERVER] Processing file list request from peer %s\n", msg.Server)
+		logger.Info("Processing file list request from peer %s", msg.Server)
 
 		// Send our current file list back to the requesting peer
 		if err := s.sendFileListToPeer(msg.Server); err != nil {
-			fmt.Printf("[SERVER] ERROR: Failed to send file list to %s: %v\n", msg.Server, err)
+			logger.Error("Failed to send file list to %s: %v", msg.Server, err)
 		}
 
 	case "file_deletions":
-		fmt.Printf("[SERVER] Processing file deletions from peer %s\n", msg.Server)
+		logger.Info("Processing file deletions from peer %s", msg.Server)
 
 		// Extract deletions list from message
 		deletionsData, ok := msg.Data["deletions"]
 		if !ok {
-			fmt.Printf("[SERVER] ERROR: No deletions data in message from %s\n", msg.Server)
+			logger.Error("No deletions data in message from %s", msg.Server)
 			break
 		}
 
 		// Convert to proper format
 		deletionsJson, err := json.Marshal(deletionsData)
 		if err != nil {
-			fmt.Printf("[SERVER] ERROR: Failed to marshal deletions data: %v\n", err)
+			logger.Error("Failed to marshal deletions data: %v", err)
 			break
 		}
 
 		var deletedFiles []p2p.FileInfo
 		if err := json.Unmarshal(deletionsJson, &deletedFiles); err != nil {
-			fmt.Printf("[SERVER] ERROR: Failed to unmarshal deletions data: %v\n", err)
+			logger.Error("Failed to unmarshal deletions data: %v", err)
 			break
 		}
 
-		fmt.Printf("[SERVER] Received %d deletions from peer %s\n", len(deletedFiles), msg.Server)
+		logger.Info("Received %d deletions from peer %s", len(deletedFiles), msg.Server)
 
 		// Apply deletions
 		if err := s.applyDeletionsFromPeer(msg.Server, deletedFiles); err != nil {
-			fmt.Printf("[SERVER] ERROR: Failed to apply deletions from %s: %v\n", msg.Server, err)
+			logger.Error("Failed to apply deletions from %s: %v", msg.Server, err)
 		}
 
 	case "request_sync":
-		fmt.Printf("[SERVER] Received sync request from %s\n", msg.Server)
+		logger.Info("Received sync request from %s", msg.Server)
 		// Send our file list back
 		localFiles, err := s.sync.GetLocalFiles()
 		if err != nil {
-			fmt.Printf("[SERVER] ERROR: Failed to get local files: %v\n", err)
+			logger.Error("Failed to get local files: %v", err)
 			break
 		}
 
@@ -280,18 +322,18 @@ func (s *Server) handleSyncMessage(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := s.p2p.SendMessageToPeer(msg.Server, response); err != nil {
-			fmt.Printf("[SERVER] ERROR: Failed to send file list to %s: %v\n", msg.Server, err)
+			logger.Error("Failed to send file list to %s: %v", msg.Server, err)
 		}
 
 	default:
-		fmt.Printf("[SERVER] WARNING: Unknown message type: %s from %s\n", msg.Type, msg.Server)
+		logger.Warn("Unknown message type: %s from %s", msg.Type, msg.Server)
 	}
 
 	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) sendFileListToPeer(peerName string) error {
-	fmt.Printf("[SERVER] Sending file list to peer: %s\n", peerName)
+	logger.Info("Sending file list to peer: %s", peerName)
 
 	// Get current local files
 	localFiles, err := s.sync.GetCurrentFiles()
@@ -309,19 +351,103 @@ func (s *Server) handleServeFile(w http.ResponseWriter, r *http.Request) {
 
 	// Get current working directory
 	cwd, _ := os.Getwd()
-	fmt.Printf("[SERVER] CWD: %s, SyncDir: %s\n", cwd, s.config.Server.SyncDir)
+	logger.Debug("CWD: %s, SyncDir: %s", cwd, s.config.Server.SyncDir)
 
 	localPath := filepath.Join(s.config.Server.SyncDir, filePath)
-	fmt.Printf("[SERVER] Serving file: %s (local path: %s, sync_dir: %s)\n", filePath, localPath, s.config.Server.SyncDir)
+	logger.Debug("Serving file: %s (local path: %s, sync_dir: %s)", filePath, localPath, s.config.Server.SyncDir)
 
-	// Check if file exists
-	if _, err := os.Stat(localPath); os.IsNotExist(err) {
-		fmt.Printf("[SERVER] ERROR: File not found: %s (sync_dir: %s, filePath: %s)\n", localPath, s.config.Server.SyncDir, filePath)
+	// Check if file exists and get file info
+	info, err := os.Stat(localPath)
+	if os.IsNotExist(err) {
+		logger.Error("File not found: %s (sync_dir: %s, filePath: %s)", localPath, s.config.Server.SyncDir, filePath)
 		http.NotFound(w, r)
+		return
+	} else if err != nil {
+		logger.Error("Failed to stat file %s: %v", localPath, err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	fmt.Printf("[SERVER] File exists, serving: %s\n", localPath)
+	logger.Debug("File exists (%d bytes), checking range request", info.Size())
+
+	// Check for Range header
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		logger.Debug("Range request: %s", rangeHeader)
+
+		// Parse range header (e.g., "bytes=100-199")
+		if strings.HasPrefix(rangeHeader, "bytes=") {
+			rangeSpec := strings.TrimPrefix(rangeHeader, "bytes=")
+			parts := strings.Split(rangeSpec, "-")
+			if len(parts) == 2 {
+				startStr, endStr := parts[0], parts[1]
+
+				var start, end int64
+				if startStr != "" {
+					start, err = strconv.ParseInt(startStr, 10, 64)
+					if err != nil {
+						logger.Error("Invalid range start: %s", startStr)
+						http.Error(w, "Bad Request", http.StatusBadRequest)
+						return
+					}
+				}
+
+				if endStr != "" {
+					end, err = strconv.ParseInt(endStr, 10, 64)
+					if err != nil {
+						logger.Error("Invalid range end: %s", endStr)
+						http.Error(w, "Bad Request", http.StatusBadRequest)
+						return
+					}
+				} else {
+					end = info.Size() - 1
+				}
+
+				// Validate range
+				if start < 0 || end >= info.Size() || start > end {
+					logger.Error("Invalid range: %d-%d (file size: %d)", start, end, info.Size())
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", info.Size()))
+					http.Error(w, "Requested Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+					return
+				}
+
+				// Open file and seek to start position
+				file, err := os.Open(localPath)
+				if err != nil {
+					logger.Error("Failed to open file: %v", err)
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					return
+				}
+				defer file.Close()
+
+				// Seek to start position
+				if _, err := file.Seek(start, 0); err != nil {
+					logger.Error("Failed to seek file: %v", err)
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					return
+				}
+
+				// Set response headers
+				contentLength := end - start + 1
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, info.Size()))
+				w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+				w.WriteHeader(http.StatusPartialContent)
+
+				logger.Debug("Serving range %d-%d (%d bytes)", start, end, contentLength)
+
+				// Copy the requested range
+				_, err = io.CopyN(w, file, contentLength)
+				if err != nil {
+					logger.Error("Failed to copy range: %v", err)
+				} else {
+					logger.Info("Range served successfully")
+				}
+				return
+			}
+		}
+	}
+
+	// No range request or invalid range, serve entire file
+	logger.Debug("Serving entire file: %s", localPath)
 	http.ServeFile(w, r, localPath)
 }
 
@@ -344,16 +470,20 @@ func (s *Server) handleReceiveFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	if _, err := io.Copy(file, r.Body); err != nil {
+	fileSize, err := io.Copy(file, r.Body)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Notify UI about successful upload
+	s.sync.NotifyUpload(filePath, "local", fileSize)
 
 	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) checkAndDownloadMissingFiles(peerName string, remoteFiles []p2p.FileInfo) error {
-	fmt.Printf("[SERVER] Checking for missing files from peer %s\n", peerName)
+	logger.Info("Checking for missing files from peer %s", peerName)
 
 	localFiles, err := s.sync.GetLocalFiles()
 	if err != nil {
@@ -373,60 +503,60 @@ func (s *Server) checkAndDownloadMissingFiles(peerName string, remoteFiles []p2p
 		localFile, exists := localFileMap[remoteFile.Path]
 
 		if !exists {
-			// File doesn't exist locally - download it
-			fmt.Printf("[SERVER] File missing locally: %s - downloading from %s\n", remoteFile.Path, peerName)
-			if err := s.sync.DownloadFile(peerName, remoteFile.Path); err != nil {
-				fmt.Printf("[SERVER] ERROR: Failed to download %s: %v\n", remoteFile.Path, err)
-			} else {
-				fmt.Printf("[SERVER] Successfully downloaded: %s\n", remoteFile.Path)
+			// File doesn't exist locally - queue it for download
+			logger.Info("File missing locally: %s - queuing download from %s", remoteFile.Path, peerName)
+			select {
+			case s.downloadQueue <- downloadTask{peerName: peerName, filePath: remoteFile.Path}:
 				filesToDownload++
+			default:
+				logger.Warn("Download queue full, skipping %s", remoteFile.Path)
 			}
 		} else if localFile.Hash != remoteFile.Hash {
 			// File exists but hash differs - could be newer version
-			fmt.Printf("[SERVER] File hash mismatch for %s (local: %s, remote: %s)\n",
+			logger.Info("File hash mismatch for %s (local: %s, remote: %s)",
 				remoteFile.Path, localFile.Hash[:8]+"...", remoteFile.Hash[:8]+"...")
 
 			// For simplicity, we'll download the remote version if it's newer
 			if remoteFile.Modified.After(localFile.Modified) {
-				fmt.Printf("[SERVER] Remote file is newer, downloading: %s\n", remoteFile.Path)
-				if err := s.sync.DownloadFile(peerName, remoteFile.Path); err != nil {
-					fmt.Printf("[SERVER] ERROR: Failed to download updated %s: %v\n", remoteFile.Path, err)
-				} else {
-					fmt.Printf("[SERVER] Successfully updated: %s\n", remoteFile.Path)
+				logger.Info("Remote file is newer, queuing download: %s", remoteFile.Path)
+				select {
+				case s.downloadQueue <- downloadTask{peerName: peerName, filePath: remoteFile.Path}:
 					filesToDownload++
+				default:
+					logger.Warn("Download queue full, skipping %s", remoteFile.Path)
 				}
 			}
 		}
 	}
 
 	if filesToDownload == 0 {
-		fmt.Printf("[SERVER] No files to download from peer %s\n", peerName)
+		logger.Info("No files to download from peer %s", peerName)
 	} else {
-		fmt.Printf("[SERVER] Downloaded %d files from peer %s\n", filesToDownload, peerName)
+		logger.Info("Queued %d files for download from peer %s", filesToDownload, peerName)
 	}
 
 	return nil
 }
 
 func (s *Server) applyDeletionsFromPeer(peerName string, deletedFiles []p2p.FileInfo) error {
-	fmt.Printf("[SERVER] Applying %d deletions from peer %s\n", len(deletedFiles), peerName)
+	logger.Info("Applying %d deletions from peer %s", len(deletedFiles), peerName)
 
 	deletionsApplied := 0
 
 	for _, deletedFile := range deletedFiles {
-		fmt.Printf("[SERVER] Applying deletion: %s\n", deletedFile.Path)
+		logger.Info("Applying deletion: %s", deletedFile.Path)
 		if err := s.sync.ApplyDeletion(peerName, deletedFile.Path); err != nil {
-			fmt.Printf("[SERVER] ERROR: Failed to apply deletion of %s: %v\n", deletedFile.Path, err)
+			logger.Error("Failed to apply deletion of %s: %v", deletedFile.Path, err)
 		} else {
-			fmt.Printf("[SERVER] Successfully applied deletion: %s\n", deletedFile.Path)
+			logger.Info("Successfully applied deletion: %s", deletedFile.Path)
 			deletionsApplied++
 		}
 	}
 
 	if deletionsApplied == 0 {
-		fmt.Printf("[SERVER] No deletions applied from peer %s\n", peerName)
+		logger.Info("No deletions applied from peer %s", peerName)
 	} else {
-		fmt.Printf("[SERVER] Applied %d deletions from peer %s\n", deletionsApplied, peerName)
+		logger.Info("Applied %d deletions from peer %s", deletionsApplied, peerName)
 	}
 
 	return nil
